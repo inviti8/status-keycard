@@ -243,6 +243,21 @@ public class KeycardTest {
     assertEquals(0x9000, response.getSw());
     byte[] data = response.getData();
     assertTrue(new ApplicationInfo(data).isInitializedCard());
+
+    // The Application Info Template (0xA4) length must exactly match its content so a strict
+    // BER-TLV parser does not truncate the trailing identity certificate (tag 0x8A), which the
+    // V2 secure channel needs. Regression guard for the off-by-one in selectApplet().
+    assertEquals(KeycardApplet.TLV_APPLICATION_INFO_TEMPLATE, data[0]);
+    int declaredLen;
+    int contentStart;
+    if ((data[1] & 0xFF) == 0x81) {          // BER long-form (initialized card)
+      declaredLen = data[2] & 0xFF;
+      contentStart = 3;
+    } else {                                  // short-form (uninitialized card)
+      declaredLen = data[1] & 0xFF;
+      contentStart = 2;
+    }
+    assertEquals(data.length - contentStart, declaredLen, "A4 template length must equal its content length");
   }
 
   @Test
