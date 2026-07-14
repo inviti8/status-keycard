@@ -76,6 +76,17 @@ test {
 task install (type: im.status.keycard.build.InstallTask)
 task lock (type: im.status.keycard.build.LockTask) //DESTRUCTIVE: Running this task will lock you out of updating the applet!
 
+// Runs the applet suite in jcardsim and serves raw APDUs over TCP (for the Rust client, no hardware).
+task simServer (type: JavaExec) {
+  dependsOn testClasses
+  classpath = sourceSets.test.runtimeClasspath.filter { f -> f.name != "api_classic.jar" }
+  main = 'im.status.keycard.SimServer'
+  jvmArgs '-noverify'
+  if (project.hasProperty('sim.port')) {
+    systemProperty 'sim.port', project.property('sim.port')
+  }
+}
+
 if (testTarget == 'card') {
   tasks.install.dependsOn(convertJavacard)
   tasks.test.dependsOn(install)
