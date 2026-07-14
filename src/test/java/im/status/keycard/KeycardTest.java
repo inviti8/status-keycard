@@ -11,9 +11,13 @@ import im.status.keycard.io.APDUCommand;
 import im.status.keycard.io.APDUResponse;
 import javacard.framework.AID;
 import org.bitcoinj.core.ECKey;
+import org.apache.commons.codec.binary.Base32;
 import org.bitcoinj.crypto.ChildNumber;
 import org.bitcoinj.crypto.DeterministicKey;
 import org.bitcoinj.crypto.HDKeyDerivation;
+import org.bitcoinj.crypto.MnemonicCode;
+import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters;
+import org.bouncycastle.crypto.signers.Ed25519Signer;
 import org.bouncycastle.jce.ECNamedCurveTable;
 import org.bouncycastle.jce.spec.ECParameterSpec;
 import org.bouncycastle.jce.spec.ECPublicKeySpec;
@@ -927,6 +931,129 @@ public class KeycardTest {
     verifySignResp(data, response);
   }
 
+  @Test
+  @DisplayName("SIGN command with Ed25519")
+  void signEd25519Test() throws Exception {
+    byte[] data = "some data to be hashed".getBytes();
+    byte[] hash = sha256(data);
+    String path = "m/44'/148'/0'";
+
+    if (cmdSet.getApplicationInfo().hasSecureChannelCapability()) {
+      cmdSet.autoOpenSecureChannel();
+    }
+
+    if (cmdSet.getApplicationInfo().hasCredentialsManagementCapability()) {
+      APDUResponse pinResponse = cmdSet.verifyPIN("000000");
+      assertEquals(0x9000, pinResponse.getSw());
+    }
+
+    if (!cmdSet.getApplicationInfo().hasMasterKey()) {
+      APDUResponse genResponse = cmdSet.generateKey();
+      assertEquals(0x9000, genResponse.getSw());
+    }
+
+    APDUResponse response = cmdSet.signWithPath(hash, path, KeycardCommandSet.SIGN_P2_EDDSA_ED25519, false);
+    assertEquals(0x9000, response.getSw());
+    byte[] respData = response.getData();
+
+    byte[] pubKey = extractPublicKeyFromSignature(respData);
+    assertEquals(32, pubKey.length);
+
+    byte[] sigTlv = extractSignature(respData);
+    assertEquals((byte) 0x88, sigTlv[0]);
+    assertEquals((byte) 64, sigTlv[1]);
+    byte[] sig = Arrays.copyOfRange(sigTlv, 2, 66);
+
+    // RFC 8032 verification against the returned public key
+    Ed25519Signer verifier = new Ed25519Signer();
+    verifier.init(false, new Ed25519PublicKeyParameters(pubKey, 0));
+    verifier.update(hash, 0, hash.length);
+    assertTrue(verifier.verifySignature(sig), "Ed25519 signature must verify");
+
+    // pure Ed25519 is deterministic: same key, same message => same signature
+    APDUResponse response2 = cmdSet.signWithPath(hash, path, KeycardCommandSet.SIGN_P2_EDDSA_ED25519, false);
+    assertEquals(0x9000, response2.getSw());
+    assertArrayEquals(respData, response2.getData(), "Ed25519 signing must be deterministic");
+
+    // a different message must verify too (fresh nonce path)
+    byte[] hash2 = sha256("something else".getBytes());
+    response = cmdSet.signWithPath(hash2, path, KeycardCommandSet.SIGN_P2_EDDSA_ED25519, false);
+    assertEquals(0x9000, response.getSw());
+    assertArrayEquals(pubKey, extractPublicKeyFromSignature(response.getData()), "same path => same pubkey");
+    sig = Arrays.copyOfRange(extractSignature(response.getData()), 2, 66);
+    verifier = new Ed25519Signer();
+    verifier.init(false, new Ed25519PublicKeyParameters(pubKey, 0));
+    verifier.update(hash2, 0, hash2.length);
+    assertTrue(verifier.verifySignature(sig), "second Ed25519 signature must verify");
+
+    // ECDSA on the same derived path still works
+    response = cmdSet.signWithPath(hash, path, false);
+    verifySignResp(data, response);
+  }
+
+  @Test
+  @DisplayName("SLIP-0010 Ed25519 derivation matches SEP-0005 test vector")
+  void stellarSep0005Test() throws Exception {
+    // SEP-0005 test vector 1: 12-word mnemonic, primary account m/44'/148'/0'
+    String mnemonic = "illness spike retreat truth genius clock brain pass fit cave bargain toe";
+    String expectedAddress = "GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOOHSUJUJ6";
+    byte[] expectedPub = decodeStrkey(expectedAddress);
+
+    byte[] seed = MnemonicCode.toSeed(Arrays.asList(mnemonic.split(" ")), "");
+    byte[] stellarPath = {
+        (byte) 0x80, 0x00, 0x00, 0x2C, // 44'
+        (byte) 0x80, 0x00, 0x00, (byte) 0x94, // 148'
+        (byte) 0x80, 0x00, 0x00, 0x00  // 0'
+    };
+
+    if (cmdSet.getApplicationInfo().hasSecureChannelCapability()) {
+      cmdSet.autoOpenSecureChannel();
+    }
+
+    if (cmdSet.getApplicationInfo().hasCredentialsManagementCapability()) {
+      APDUResponse pinResponse = cmdSet.verifyPIN("000000");
+      assertEquals(0x9000, pinResponse.getSw());
+    }
+
+    APDUResponse response = cmdSet.loadKey(seed);
+    assertEquals(0x9000, response.getSw());
+
+    // EXPORT KEY with P2 = ED25519 public
+    response = cmdSet.exportKey(stellarPath, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardApplet.EXPORT_KEY_P2_ED25519_PUBLIC);
+    assertEquals(0x9000, response.getSw());
+    byte[] keyTemplate = response.getData();
+    assertEquals(KeycardApplet.TLV_KEY_TEMPLATE, keyTemplate[0]);
+    assertEquals(KeycardApplet.TLV_PUB_KEY, keyTemplate[2]);
+    assertEquals(32, keyTemplate[3]);
+    byte[] exportedPub = Arrays.copyOfRange(keyTemplate, 4, 36);
+    assertArrayEquals(expectedPub, exportedPub, "exported pubkey must match SEP-0005 G-address");
+
+    // SIGN with the same path must report the same pubkey and produce a valid signature
+    byte[] hash = sha256("stellar transaction signature payload".getBytes());
+    response = cmdSet.signWithPath(hash, "m/44'/148'/0'", KeycardCommandSet.SIGN_P2_EDDSA_ED25519, false);
+    assertEquals(0x9000, response.getSw());
+    byte[] signPub = extractPublicKeyFromSignature(response.getData());
+    assertArrayEquals(expectedPub, signPub, "SIGN pubkey must match SEP-0005 G-address");
+
+    byte[] sig = Arrays.copyOfRange(extractSignature(response.getData()), 2, 66);
+    Ed25519Signer verifier = new Ed25519Signer();
+    verifier.init(false, new Ed25519PublicKeyParameters(expectedPub, 0));
+    verifier.update(hash, 0, hash.length);
+    assertTrue(verifier.verifySignature(sig), "Ed25519 signature must verify against SEP-0005 key");
+
+    // non-hardened path elements are invalid for ed25519 (SW_DATA_INVALID, same as failed BIP32 derivation)
+    response = cmdSet.signWithPath(hash, "m/44'/148'/0", KeycardCommandSet.SIGN_P2_EDDSA_ED25519, false);
+    assertEquals(0x6984, response.getSw());
+  }
+
+  private byte[] decodeStrkey(String address) {
+    byte[] raw = new Base32().decode(address);
+    // version byte (1) || ed25519 public key (32) || CRC16 (2)
+    assertEquals(35, raw.length);
+    assertEquals((byte) (6 << 3), raw[0]);
+    return Arrays.copyOfRange(raw, 1, 33);
+  }
+
   private void verifySchnorrSignResp(byte[] data, APDUResponse response) throws Exception {
     assertEquals(0x9000, response.getSw());
     byte[] sig = response.getData();
@@ -1242,6 +1369,42 @@ public class KeycardTest {
 
     CashApplicationInfo info = new CashApplicationInfo(response.getData());
     assertTrue(info.getAppVersion() > 0);
+  }
+
+  @Test
+  @DisplayName("Cash applet Ed25519 signing")
+  void cashEd25519Test() throws Exception {
+    CashCommandSet cashCmdSet = new CashCommandSet(sdkChannel);
+    APDUResponse response = cashCmdSet.select();
+    assertEquals(0x9000, response.getSw());
+
+    byte[] hash = sha256("cash stellar tx".getBytes());
+
+    // Ed25519 sign (P2 = 0x01), no PIN or secure channel on the Cash applet
+    response = sdkChannel.send(new APDUCommand(0x80, KeycardApplet.INS_SIGN, 0x00, SECP256k1.SIGN_ED25519, hash));
+    assertEquals(0x9000, response.getSw());
+
+    byte[] pubKey = extractPublicKeyFromSignature(response.getData());
+    assertEquals(32, pubKey.length);
+    byte[] sigTlv = extractSignature(response.getData());
+    assertEquals((byte) 0x88, sigTlv[0]);
+    assertEquals((byte) 64, sigTlv[1]);
+    byte[] sig = Arrays.copyOfRange(sigTlv, 2, 66);
+
+    Ed25519Signer verifier = new Ed25519Signer();
+    verifier.init(false, new Ed25519PublicKeyParameters(pubKey, 0));
+    verifier.update(hash, 0, hash.length);
+    assertTrue(verifier.verifySignature(sig), "Cash applet Ed25519 signature must verify");
+
+    // stable key: signing again reports the same public key
+    response = sdkChannel.send(new APDUCommand(0x80, KeycardApplet.INS_SIGN, 0x00, SECP256k1.SIGN_ED25519, hash));
+    assertEquals(0x9000, response.getSw());
+    assertArrayEquals(pubKey, extractPublicKeyFromSignature(response.getData()));
+
+    // ECDSA signing still works
+    response = sdkChannel.send(new APDUCommand(0x80, KeycardApplet.INS_SIGN, 0x00, 0x00, hash));
+    assertEquals(0x9000, response.getSw());
+    assertEquals(65, extractPublicKeyFromSignature(response.getData()).length);
   }
 
   @Test

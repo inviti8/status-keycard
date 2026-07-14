@@ -81,6 +81,7 @@ public class KeycardApplet extends Applet {
   static final byte EXPORT_KEY_P2_PRIVATE_AND_PUBLIC = 0x00;
   static final byte EXPORT_KEY_P2_PUBLIC_ONLY = 0x01;
   static final byte EXPORT_KEY_P2_EXTENDED_PUBLIC = 0x02;
+  static final byte EXPORT_KEY_P2_ED25519_PUBLIC = 0x03;
 
   static final byte STORE_DATA_P1_PUBLIC = 0x00;
   static final byte STORE_DATA_P1_NDEF = 0x01;
@@ -142,12 +143,19 @@ public class KeycardApplet extends Applet {
   private byte[] leeMasterChainCode;
   private byte[] leeChainCode;
 
+  // SLIP-0010 ed25519 master (computed from the same seed as the BIP32 master at load time,
+  // since the raw seed itself is never persisted)
+  private byte[] ed25519MasterKey;
+  private byte[] ed25519MasterChainCode;
+  private boolean hasEd25519Master;
+
   private byte[] tmpPath; // byte 0 = path length, bytes 1..N = path data
 
   private byte[] keyUID;
 
   private Crypto crypto;
   private SECP256k1 secp256k1;
+  private Ed25519 ed25519;
 
   private byte[] derivationOutput;
 
@@ -179,6 +187,7 @@ public class KeycardApplet extends Applet {
   public KeycardApplet(byte[] bArray, short bOffset, byte bLength) {
     crypto = new Crypto();
     secp256k1 = new SECP256k1();
+    ed25519 = new Ed25519();
 
     masterPublic = (ECPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PUBLIC, SECP256k1.SECP256K1_KEY_SIZE, false);
     masterPrivate = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE, SECP256k1.SECP256K1_KEY_SIZE, false);
@@ -189,6 +198,10 @@ public class KeycardApplet extends Applet {
     masterSsk = (AESKey) KeyBuilder.buildKey(KeyBuilder.TYPE_AES, KeyBuilder.LENGTH_AES_256, false);
     leeMasterChainCode = new byte[CHAIN_CODE_SIZE];
     leeChainCode = leeMasterChainCode;
+
+    ed25519MasterKey = new byte[Crypto.KEY_SECRET_SIZE];
+    ed25519MasterChainCode = new byte[CHAIN_CODE_SIZE];
+    hasEd25519Master = false;
 
     tmpPath = JCSystem.makeTransientByteArray((short)(KEY_PATH_MAX_DEPTH * 4 + 1), JCSystem.CLEAR_ON_DESELECT);
 
@@ -221,6 +234,7 @@ public class KeycardApplet extends Applet {
 
     if (selectingApplet()) {
       secp256k1.onSelect();
+      ed25519.onSelect();
       secureChannel.onSelect();
       selectApplet(apdu);
       return;
@@ -703,6 +717,7 @@ public class KeycardApplet extends Applet {
 
       masterPrivate.setS(apduBuffer, (short) (privOffset + 2), apduBuffer[(short) (privOffset + 1)]);
       masterSsk.clearKey();
+      hasEd25519Master = false;
 
       if (isExtended) {
         if (apduBuffer[(short) (chainOffset + 1)] == CHAIN_CODE_SIZE) {
@@ -746,10 +761,13 @@ public class KeycardApplet extends Applet {
 
     short outOff = (short) (ISO7816.OFFSET_CDATA + seedLen);
     short outOffLee = 0;
+    short outOffEd = 0;
 
     switch(seedType) {
       case SEED_BIP32:
         crypto.bip32MasterFromSeed(Crypto.KEY_BITCOIN_SEED, apduBuffer, (short) ISO7816.OFFSET_CDATA, seedLen, apduBuffer, outOff);
+        outOffEd = (short) (outOff + (short)(CHAIN_CODE_SIZE * 2));
+        crypto.bip32MasterFromSeed(Ed25519.KEY_ED25519_SEED, apduBuffer, (short) ISO7816.OFFSET_CDATA, seedLen, apduBuffer, outOffEd);
         break;
       case SEED_LEE:
         outOffLee = (short) (outOff + (short)(CHAIN_CODE_SIZE * 2));
@@ -773,6 +791,14 @@ public class KeycardApplet extends Applet {
       Util.arrayCopy(apduBuffer, (short) (outOffLee + CHAIN_CODE_SIZE), leeMasterChainCode, (short) 0, CHAIN_CODE_SIZE);
     } else {
       masterSsk.clearKey();
+    }
+
+    if (outOffEd > 0) {
+      Util.arrayCopy(apduBuffer, outOffEd, ed25519MasterKey, (short) 0, Crypto.KEY_SECRET_SIZE);
+      Util.arrayCopy(apduBuffer, (short) (outOffEd + Crypto.KEY_SECRET_SIZE), ed25519MasterChainCode, (short) 0, CHAIN_CODE_SIZE);
+      hasEd25519Master = true;
+    } else {
+      hasEd25519Master = false;
     }
 
     short pubLen = secp256k1.derivePublicKey(masterPrivate, apduBuffer, (short) 0);
@@ -946,7 +972,10 @@ public class KeycardApplet extends Applet {
     masterPrivate.clearKey();
     masterPublic.clearKey();
     masterSsk.clearKey();
+    hasEd25519Master = false;
     resetCurveParameters();
+    Util.arrayFillNonAtomic(ed25519MasterKey, (short) 0, (short) ed25519MasterKey.length, (byte) 0);
+    Util.arrayFillNonAtomic(ed25519MasterChainCode, (short) 0, (short) ed25519MasterChainCode.length, (byte) 0);
     Util.arrayFillNonAtomic(masterChainCode, (short) 0, (short) masterChainCode.length, (byte) 0);
     Util.arrayFillNonAtomic(altChainCode, (short) 0, (short) altChainCode.length, (byte) 0);
     Util.arrayFillNonAtomic(leeMasterChainCode, (short) 0, (short) leeMasterChainCode.length, (byte) 0);
@@ -1061,19 +1090,41 @@ public class KeycardApplet extends Applet {
       ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
     }
 
-    doDerive(apduBuffer, MessageDigest.LENGTH_SHA_256);
+    if (apduBuffer[OFFSET_P2] == SECP256k1.SIGN_ED25519) {
+      if (!hasEd25519Master) {
+        ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+      }
+
+      if (!ed25519.slip10Derive(crypto, ed25519MasterKey, ed25519MasterChainCode, tmpPath, (short) 1, (short) tmpPath[0], apduBuffer, (short) (OFFSET_CDATA + MessageDigest.LENGTH_SHA_256), derivationOutput, (short) 0)) {
+        ISOException.throwIt(ISO7816.SW_DATA_INVALID);
+      }
+    } else {
+      doDerive(apduBuffer, MessageDigest.LENGTH_SHA_256);
+    }
 
     Util.arrayCopyNonAtomic(apduBuffer, OFFSET_CDATA, apduBuffer, SIGN_HASH_OFF, MessageDigest.LENGTH_SHA_256);
 
     apduBuffer[OFFSET_CDATA] = TLV_SIGNATURE_TEMPLATE;
     apduBuffer[(short)(OFFSET_CDATA + 3)] = TLV_PUB_KEY;
-    short outLen = apduBuffer[(short)(OFFSET_CDATA + 4)] = Crypto.KEY_PUB_SIZE;
+    short outLen;
 
-    secp256k1.derivePublicKey(derivationOutput, (short) 0, apduBuffer, (short) (OFFSET_CDATA + 5));
+    if (apduBuffer[OFFSET_P2] == SECP256k1.SIGN_ED25519) {
+      apduBuffer[(short)(OFFSET_CDATA + 4)] = (byte) Ed25519.ED25519_KEY_SIZE;
+      short pubOff = (short) (OFFSET_CDATA + 5);
+      short sigOff = (short) (pubOff + Ed25519.ED25519_KEY_SIZE);
+      ed25519.signHash(crypto, derivationOutput, (short) 0, apduBuffer, SIGN_HASH_OFF, apduBuffer, pubOff, apduBuffer, (short) (sigOff + 2));
+      apduBuffer[sigOff] = SECP256k1.TLV_RAW_SIGNATURE;
+      apduBuffer[(short)(sigOff + 1)] = (byte) Ed25519.ED25519_SIG_SIZE;
+      outLen = (short) (5 + Ed25519.ED25519_KEY_SIZE + 2 + Ed25519.ED25519_SIG_SIZE);
+    } else {
+      outLen = apduBuffer[(short)(OFFSET_CDATA + 4)] = Crypto.KEY_PUB_SIZE;
 
-    outLen += 5;
-    short sigOff = (short) (OFFSET_CDATA + outLen);
-    outLen += secp256k1.signHash(apduBuffer[OFFSET_P2], crypto, secp256k1.tmpECPrivateKey, apduBuffer, SIGN_HASH_OFF, apduBuffer, sigOff);
+      secp256k1.derivePublicKey(derivationOutput, (short) 0, apduBuffer, (short) (OFFSET_CDATA + 5));
+
+      outLen += 5;
+      short sigOff = (short) (OFFSET_CDATA + outLen);
+      outLen += secp256k1.signHash(apduBuffer[OFFSET_P2], crypto, secp256k1.tmpECPrivateKey, apduBuffer, SIGN_HASH_OFF, apduBuffer, sigOff);
+    }
 
     apduBuffer[(short)(OFFSET_CDATA + 1)] = (byte) 0x81;
     apduBuffer[(short)(OFFSET_CDATA + 2)] = (byte) (outLen - 3);
@@ -1092,6 +1143,11 @@ public class KeycardApplet extends Applet {
 
     if (!pin.isValidated() || !masterPrivate.isInitialized()) {
       ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+    }
+
+    if (apduBuffer[OFFSET_P2] == EXPORT_KEY_P2_ED25519_PUBLIC) {
+      exportEd25519Public(apdu, apduBuffer, dataLen);
+      return;
     }
 
     boolean publicOnly;
@@ -1162,6 +1218,39 @@ public class KeycardApplet extends Applet {
     apduBuffer[(OFFSET_CDATA + 1)] = (byte) (len - 2);
 
     secureChannel.respond(apdu, len, ISO7816.SW_NO_ERROR);
+  }
+
+  /**
+   * Exports the SLIP-0010-derived Ed25519 public key (32 bytes, compressed Edwards encoding) for the
+   * given hardened path. The host is responsible for the Stellar strkey (G...) encoding. Called by
+   * exportKey for P2 = EXPORT_KEY_P2_ED25519_PUBLIC; secure channel and PIN checks already done there.
+   *
+   * @param apdu the JCRE-owned APDU object.
+   * @param apduBuffer the APDU buffer
+   * @param dataLen the length of the path in the data field
+   */
+  private void exportEd25519Public(APDU apdu, byte[] apduBuffer, short dataLen) {
+    if (!hasEd25519Master) {
+      ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+    }
+
+    updateDerivationPath(apduBuffer, (short) 0, dataLen);
+
+    if (!ed25519.slip10Derive(crypto, ed25519MasterKey, ed25519MasterChainCode, tmpPath, (short) 1, (short) tmpPath[0], apduBuffer, (short) (OFFSET_CDATA + dataLen), derivationOutput, (short) 0)) {
+      ISOException.throwIt(ISO7816.SW_DATA_INVALID);
+    }
+
+    short off = OFFSET_CDATA;
+
+    apduBuffer[off++] = TLV_KEY_TEMPLATE;
+    off++;
+    apduBuffer[off++] = TLV_PUB_KEY;
+    apduBuffer[off++] = (byte) Ed25519.ED25519_KEY_SIZE;
+    ed25519.publicKey(crypto, derivationOutput, (short) 0, apduBuffer, off);
+    off += Ed25519.ED25519_KEY_SIZE;
+
+    apduBuffer[(short)(OFFSET_CDATA + 1)] = (byte) (off - OFFSET_CDATA - 2);
+    secureChannel.respond(apdu, (short) (off - OFFSET_CDATA), ISO7816.SW_NO_ERROR);
   }
 
   /**
