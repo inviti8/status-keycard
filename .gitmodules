@@ -3,4 +3,4 @@
 	url = https://github.com/martinpaljak/oracle_javacard_sdks
 [submodule "jcardsim"]
 	path = jcardsim
-	url = https://github.com/status-im/jcardsim
+	url = https://github.com/inviti8/jcardsim
