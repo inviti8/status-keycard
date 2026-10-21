@@ -4,6 +4,7 @@ import com.licel.jcardsim.smartcardio.CardSimulator;
 import com.licel.jcardsim.utils.AIDUtil;
 import javacard.framework.AID;
 import javacard.framework.ISO7816;
+import javacard.security.CryptoException;
 import org.bouncycastle.asn1.x9.X9ECParameters;
 import org.bouncycastle.crypto.ec.CustomNamedCurves;
 import org.bouncycastle.math.ec.ECCurve;
@@ -90,18 +91,51 @@ public class HwProbeTest {
   }
 
   @Test
-  @DisplayName("Wei25519 scalar multiplication matches BouncyCastle, all three key variants")
-  void wei25519() {
+  @DisplayName("512-bit RSA with zero-padded modulus p (JCMathLib JCOP4 path) computes 2^-1 mod p, private and public key")
+  void rsa512Inv() {
+    BigInteger p = new BigInteger(1, HwProbeApplet.WEI_P);
+    BigInteger expected = BigInteger.valueOf(2).modPow(p.subtract(BigInteger.valueOf(2)), p);
+    assertArrayEquals(fixed(expected, 32), HwProbeApplet.INV_2);
+
+    for (byte variant : new byte[] {HwProbeApplet.RSA_INV_PRIVATE, HwProbeApplet.RSA_INV_PUBLIC}) {
+      byte[] out = assertPass(run(HwProbeApplet.INS_RSA_512_INV, variant));
+      assertEquals(expected, new BigInteger(1, out), "variant " + variant);
+    }
+  }
+
+  static ECPoint weiG() {
     BigInteger p = new BigInteger(1, HwProbeApplet.WEI_P);
     BigInteger l = new BigInteger(1, HwProbeApplet.ED_L);
     ECCurve curve = new ECCurve.Fp(p, new BigInteger(1, HwProbeApplet.WEI_A), new BigInteger(1, HwProbeApplet.WEI_B), l, BigInteger.valueOf(8));
     ECPoint g = curve.decodePoint(HwProbeApplet.WEI_G);
     assertEquals(true, g.multiply(l).isInfinity());
-    byte[] expected = g.multiply(scalar()).normalize().getEncoded(false);
+    return g;
+  }
+
+  @Test
+  @DisplayName("Wei25519 scalar multiplication matches BouncyCastle, all four key variants")
+  void wei25519() {
+    byte[] expected = weiG().multiply(scalar()).normalize().getEncoded(false);
     assertArrayEquals(expected, HwProbeApplet.WEI_EXPECTED);
 
-    for (byte variant : new byte[] {HwProbeApplet.WEI_TRANSIENT_K8, HwProbeApplet.WEI_TRANSIENT_K1, HwProbeApplet.WEI_PERSISTENT_K8}) {
+    for (byte variant : new byte[] {HwProbeApplet.WEI_TRANSIENT_K8, HwProbeApplet.WEI_TRANSIENT_K1,
+        HwProbeApplet.WEI_PERSISTENT_K8, HwProbeApplet.WEI_TRANSIENT_NO_K}) {
       assertArrayEquals(expected, assertPass(run(HwProbeApplet.INS_WEI25519, variant)), "variant " + variant);
+    }
+  }
+
+  @Test
+  @DisplayName("PACE_GM expected value is SCALAR*G + G; jcardsim lacks PACE_GM, so the probe must report NO_SUCH_ALGORITHM")
+  void paceGm() {
+    ECPoint g = weiG();
+    byte[] expected = g.multiply(scalar()).add(g).normalize().getEncoded(false);
+    assertArrayEquals(expected, HwProbeApplet.PACE_EXPECTED);
+
+    // jcardsim implements no ALG_EC_PACE_GM, so this exercises the exception path. The result
+    // comparison is the same arrayCompare the passing Wei25519 probes use.
+    for (byte variant : new byte[] {HwProbeApplet.PACE_NO_K, HwProbeApplet.PACE_K8}) {
+      assertArrayEquals(new byte[] {HwProbeApplet.STATUS_EXCEPTION, HwProbeApplet.STAGE_ALLOCATE,
+          HwProbeApplet.EXC_CRYPTO, 0, CryptoException.NO_SUCH_ALGORITHM, 0}, run(HwProbeApplet.INS_PACE_GM, variant), "variant " + variant);
     }
   }
 
@@ -115,21 +149,32 @@ public class HwProbeTest {
   }
 
   @Test
-  @DisplayName("RUN_ALL returns one passing 7-byte summary row per probe")
+  @DisplayName("RUN_ALL returns one 7-byte summary row per probe: all pass except PACE_GM (absent in jcardsim)")
   void runAll() {
     byte[] rows = run(HwProbeApplet.INS_RUN_ALL, 0);
+    byte[] pass = {HwProbeApplet.STATUS_PASS, HwProbeApplet.STAGE_COMPUTE, HwProbeApplet.EXC_NONE, 0, 0};
+    byte[] noPace = {HwProbeApplet.STATUS_EXCEPTION, HwProbeApplet.STAGE_ALLOCATE, HwProbeApplet.EXC_CRYPTO, 0, CryptoException.NO_SUCH_ALGORITHM};
     byte[][] expectedIds = {
         {HwProbeApplet.INS_RSA_256, 0}, {HwProbeApplet.INS_RSA_512, 0},
+        {HwProbeApplet.INS_RSA_512_INV, HwProbeApplet.RSA_INV_PRIVATE},
+        {HwProbeApplet.INS_RSA_512_INV, HwProbeApplet.RSA_INV_PUBLIC},
         {HwProbeApplet.INS_WEI25519, HwProbeApplet.WEI_TRANSIENT_K8},
         {HwProbeApplet.INS_WEI25519, HwProbeApplet.WEI_TRANSIENT_K1},
         {HwProbeApplet.INS_WEI25519, HwProbeApplet.WEI_PERSISTENT_K8},
-        {HwProbeApplet.INS_SECP256K1, 0}};
+        {HwProbeApplet.INS_WEI25519, HwProbeApplet.WEI_TRANSIENT_NO_K},
+        {HwProbeApplet.INS_SECP256K1, 0},
+        {HwProbeApplet.INS_PACE_GM, HwProbeApplet.PACE_NO_K},
+        {HwProbeApplet.INS_PACE_GM, HwProbeApplet.PACE_K8}};
     assertEquals(expectedIds.length * HwProbeApplet.SUMMARY_ROW_LEN, rows.length);
 
     for (int i = 0; i < expectedIds.length; i++) {
       byte[] row = Arrays.copyOfRange(rows, i * HwProbeApplet.SUMMARY_ROW_LEN, (i + 1) * HwProbeApplet.SUMMARY_ROW_LEN);
-      assertArrayEquals(new byte[] {expectedIds[i][0], expectedIds[i][1], HwProbeApplet.STATUS_PASS,
-          HwProbeApplet.STAGE_COMPUTE, HwProbeApplet.EXC_NONE, 0, 0}, row, "row " + i);
+      byte[] result = expectedIds[i][0] == HwProbeApplet.INS_PACE_GM ? noPace : pass;
+      byte[] expected = new byte[HwProbeApplet.SUMMARY_ROW_LEN];
+      expected[0] = expectedIds[i][0];
+      expected[1] = expectedIds[i][1];
+      System.arraycopy(result, 0, expected, 2, result.length);
+      assertArrayEquals(expected, row, "row " + i);
     }
   }
 

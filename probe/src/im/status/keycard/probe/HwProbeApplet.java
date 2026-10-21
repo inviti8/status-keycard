@@ -11,6 +11,7 @@ import javacard.security.CryptoException;
 import javacard.security.ECPrivateKey;
 import javacard.security.KeyAgreement;
 import javacard.security.KeyBuilder;
+import javacard.security.RSAPrivateKey;
 import javacard.security.RSAPublicKey;
 import javacardx.crypto.Cipher;
 
@@ -21,11 +22,18 @@ import javacardx.crypto.Cipher;
  *   INS 0x10  256-bit RSA public key + ALG_RSA_NOPAD, modulus p = 2^255-19, exponent p-2
  *             (modular inversion). Input 2, expected (p+1)/2.
  *   INS 0x11  Control: 512-bit RSA public key + ALG_RSA_NOPAD (a size AlgTest reports as supported).
+ *   INS 0x12  Fallback for 0x10, the same inversion as JCMathLib runs it on JCOP4 P71: a 512-bit key
+ *             whose modulus is p zero-padded to 64 bytes (RSA_RESIZE_MOD). P1 selects the key:
+ *             0x00 = TYPE_RSA_PRIVATE (JCMathLib's JCOP4_P71 config), 0x01 = TYPE_RSA_PUBLIC
  *   INS 0x20  ALG_EC_SVDP_DH_PLAIN_XY on the custom Wei25519 curve. P1 selects the variant:
  *             0x00 = TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, cofactor 8 (what Ed25519 uses)
  *             0x01 = same transient key, cofactor 1
  *             0x02 = TYPE_EC_FP_PRIVATE (persistent), cofactor 8
+ *             0x03 = transient key, cofactor never set (JCMathLib's JCOP4_P71 config)
  *   INS 0x30  Control: ALG_EC_SVDP_DH_PLAIN_XY on secp256k1 (known to work on JCOP: stock Keycard).
+ *   INS 0x40  ALG_EC_PACE_GM (S*G + H, JCMathLib's hardware point addition) on Wei25519, computing
+ *             SCALAR*G + G. Needed for a cheap on-card verify-after-sign. P1 selects the key:
+ *             0x00 = transient, cofactor never set (JCMathLib's config), 0x01 = transient, cofactor 8
  *   INS 0x01  Info: JCSystem.getVersion() and the probe version.
  *   INS 0x02  Runs every probe above and returns a 7-byte summary row per probe.
  *
@@ -49,12 +57,21 @@ public class HwProbeApplet extends Applet {
   static final byte INS_RUN_ALL = (byte) 0x02;
   static final byte INS_RSA_256 = (byte) 0x10;
   static final byte INS_RSA_512 = (byte) 0x11;
+  static final byte INS_RSA_512_INV = (byte) 0x12;
   static final byte INS_WEI25519 = (byte) 0x20;
   static final byte INS_SECP256K1 = (byte) 0x30;
+  static final byte INS_PACE_GM = (byte) 0x40;
+
+  static final byte RSA_INV_PRIVATE = 0x00;
+  static final byte RSA_INV_PUBLIC = 0x01;
 
   static final byte WEI_TRANSIENT_K8 = 0x00;
   static final byte WEI_TRANSIENT_K1 = 0x01;
   static final byte WEI_PERSISTENT_K8 = 0x02;
+  static final byte WEI_TRANSIENT_NO_K = 0x03;
+
+  static final byte PACE_NO_K = 0x00;
+  static final byte PACE_K8 = 0x01;
 
   static final byte STATUS_PASS = 0x00;
   static final byte STATUS_WRONG_RESULT = 0x01;
@@ -70,11 +87,12 @@ public class HwProbeApplet extends Applet {
   static final byte EXC_SYSTEM = 0x02;
   static final byte EXC_OTHER = 0x03;
 
-  static final byte PROBE_VERSION = 0x01;
+  static final byte PROBE_VERSION = 0x02;
   static final short HEADER_LEN = 6;
   static final short SUMMARY_ROW_LEN = 7;
 
   static final byte ALG_EC_SVDP_DH_PLAIN_XY = 6; // JavaCard 3.0.5 constant
+  static final byte ALG_EC_PACE_GM = 5; // JavaCard 3.0.5 constant
 
   // p = 2^255 - 19
   static final byte[] WEI_P = {
@@ -190,6 +208,19 @@ public class HwProbeApplet extends Applet {
       (byte) 0xfb
   };
 
+  // (SCALAR + 1) * WEI_G (uncompressed), i.e. SCALAR*G + G
+  static final byte[] PACE_EXPECTED = {
+      (byte) 0x04, (byte) 0x11, (byte) 0xf9, (byte) 0x5a, (byte) 0x02, (byte) 0xca, (byte) 0xf0, (byte) 0x76,
+      (byte) 0x60, (byte) 0xb1, (byte) 0x27, (byte) 0x9d, (byte) 0x8e, (byte) 0x92, (byte) 0x82, (byte) 0x54,
+      (byte) 0xe6, (byte) 0x2b, (byte) 0x63, (byte) 0x3b, (byte) 0x7c, (byte) 0x4f, (byte) 0xdb, (byte) 0x43,
+      (byte) 0x40, (byte) 0x56, (byte) 0x70, (byte) 0x5f, (byte) 0x0b, (byte) 0xd5, (byte) 0x2c, (byte) 0x62,
+      (byte) 0xcf, (byte) 0x3b, (byte) 0xee, (byte) 0x1e, (byte) 0xf5, (byte) 0xbd, (byte) 0x8f, (byte) 0xc7,
+      (byte) 0x98, (byte) 0x1b, (byte) 0xff, (byte) 0xd3, (byte) 0x98, (byte) 0x22, (byte) 0x94, (byte) 0xf0,
+      (byte) 0xb8, (byte) 0x86, (byte) 0x3c, (byte) 0xb8, (byte) 0x35, (byte) 0x5a, (byte) 0x79, (byte) 0x89,
+      (byte) 0xad, (byte) 0x57, (byte) 0x83, (byte) 0x01, (byte) 0x9a, (byte) 0x42, (byte) 0xec, (byte) 0xdb,
+      (byte) 0x97
+  };
+
   // SCALAR * K1_G (uncompressed)
   static final byte[] K1_EXPECTED = {
       (byte) 0x04, (byte) 0xa8, (byte) 0x2f, (byte) 0x5a, (byte) 0x21, (byte) 0x7c, (byte) 0x54, (byte) 0x64,
@@ -206,8 +237,12 @@ public class HwProbeApplet extends Applet {
   private Cipher rsaCipher;
   private RSAPublicKey rsa256;
   private RSAPublicKey rsa512;
+  private RSAPrivateKey rsaInvPriv;
+  private RSAPublicKey rsaInvPub;
   private KeyAgreement ecdh;
+  private KeyAgreement pace;
   private ECPrivateKey weiTransient;
+  private ECPrivateKey weiNoK;
   private ECPrivateKey weiPersistent;
   private ECPrivateKey k1Key;
   private byte[] work;
@@ -243,8 +278,10 @@ public class HwProbeApplet extends Applet {
         break;
       case INS_RSA_256:
       case INS_RSA_512:
+      case INS_RSA_512_INV:
       case INS_WEI25519:
       case INS_SECP256K1:
+      case INS_PACE_GM:
         len = runProbe(buf[ISO7816.OFFSET_INS], buf[ISO7816.OFFSET_P1], buf, (short) 0);
         break;
       default:
@@ -259,10 +296,15 @@ public class HwProbeApplet extends Applet {
     short off = 0;
     off = summaryRow(INS_RSA_256, (byte) 0, buf, off);
     off = summaryRow(INS_RSA_512, (byte) 0, buf, off);
+    off = summaryRow(INS_RSA_512_INV, RSA_INV_PRIVATE, buf, off);
+    off = summaryRow(INS_RSA_512_INV, RSA_INV_PUBLIC, buf, off);
     off = summaryRow(INS_WEI25519, WEI_TRANSIENT_K8, buf, off);
     off = summaryRow(INS_WEI25519, WEI_TRANSIENT_K1, buf, off);
     off = summaryRow(INS_WEI25519, WEI_PERSISTENT_K8, buf, off);
+    off = summaryRow(INS_WEI25519, WEI_TRANSIENT_NO_K, buf, off);
     off = summaryRow(INS_SECP256K1, (byte) 0, buf, off);
+    off = summaryRow(INS_PACE_GM, PACE_NO_K, buf, off);
+    off = summaryRow(INS_PACE_GM, PACE_K8, buf, off);
     return off;
   }
 
@@ -295,9 +337,19 @@ public class HwProbeApplet extends Applet {
           outLen = rsa512(buf, outOff);
           match = (outLen == 64) && (buf[(short) (outOff + 63)] == (byte) 0x08) && isZero(buf, outOff, (short) 63);
           break;
+        case INS_RSA_512_INV:
+          outLen = rsa512Inv(p1, buf, outOff);
+          // numeric match: a card may return 64 bytes (zero-padded) or fewer; outLen is reported either way
+          match = (outLen >= 32) && isZero(buf, outOff, (short) (outLen - 32))
+              && Util.arrayCompare(buf, (short) (outOff + outLen - 32), INV_2, (short) 0, (short) 32) == 0;
+          break;
         case INS_WEI25519:
           outLen = wei25519(p1, buf, outOff);
           match = Util.arrayCompare(buf, outOff, WEI_EXPECTED, (short) 0, (short) WEI_EXPECTED.length) == 0;
+          break;
+        case INS_PACE_GM:
+          outLen = paceGm(p1, buf, outOff);
+          match = Util.arrayCompare(buf, outOff, PACE_EXPECTED, (short) 0, (short) PACE_EXPECTED.length) == 0;
           break;
         default:
           outLen = secp256k1(buf, outOff);
@@ -371,6 +423,42 @@ public class HwProbeApplet extends Applet {
     return rsaCipher.doFinal(tmp, (short) 0, (short) 64, buf, outOff);
   }
 
+  private short rsa512Inv(byte p1, byte[] buf, short outOff) {
+    if (p1 != RSA_INV_PRIVATE && p1 != RSA_INV_PUBLIC) {
+      ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
+    }
+
+    allocateRsaCipher();
+    if (p1 == RSA_INV_PRIVATE && rsaInvPriv == null) {
+      rsaInvPriv = (RSAPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_RSA_PRIVATE, KeyBuilder.LENGTH_RSA_512, false);
+    } else if (p1 == RSA_INV_PUBLIC && rsaInvPub == null) {
+      rsaInvPub = (RSAPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_RSA_PUBLIC, KeyBuilder.LENGTH_RSA_512, false);
+    }
+
+    stage = STAGE_SET;
+    // modulus: 32 zero bytes || p
+    byte[] tmp = workBuffer();
+    Util.arrayFillNonAtomic(tmp, (short) 0, (short) 32, (byte) 0);
+    Util.arrayCopyNonAtomic(WEI_P, (short) 0, tmp, (short) 32, (short) 32);
+
+    if (p1 == RSA_INV_PRIVATE) {
+      rsaInvPriv.setModulus(tmp, (short) 0, (short) 64);
+      rsaInvPriv.setExponent(P_MINUS_2, (short) 0, (short) 32);
+      stage = STAGE_INIT;
+      rsaCipher.init(rsaInvPriv, Cipher.MODE_DECRYPT);
+    } else {
+      rsaInvPub.setModulus(tmp, (short) 0, (short) 64);
+      rsaInvPub.setExponent(P_MINUS_2, (short) 0, (short) 32);
+      stage = STAGE_INIT;
+      rsaCipher.init(rsaInvPub, Cipher.MODE_ENCRYPT);
+    }
+
+    stage = STAGE_COMPUTE;
+    Util.arrayFillNonAtomic(tmp, (short) 0, (short) 64, (byte) 0);
+    tmp[63] = 2;
+    return rsaCipher.doFinal(tmp, (short) 0, (short) 64, buf, outOff);
+  }
+
   private short wei25519(byte p1, byte[] buf, short outOff) {
     allocateEcdh();
     ECPrivateKey key;
@@ -381,25 +469,81 @@ public class HwProbeApplet extends Applet {
       }
       key = weiPersistent;
     } else if (p1 == WEI_TRANSIENT_K8 || p1 == WEI_TRANSIENT_K1) {
-      if (weiTransient == null) {
-        weiTransient = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, (short) 256, false);
-      }
-      key = weiTransient;
+      key = transientWeiKey(true);
+    } else if (p1 == WEI_TRANSIENT_NO_K) {
+      key = transientWeiKey(false);
     } else {
       ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
       return 0;
     }
 
     stage = STAGE_SET;
+    if (p1 == WEI_TRANSIENT_NO_K) {
+      setWeiParameters(key, (short) 0);
+    } else {
+      setWeiParameters(key, p1 == WEI_TRANSIENT_K1 ? (short) 1 : (short) 8);
+    }
+
+    return scalarMult(key, WEI_G, buf, outOff);
+  }
+
+  private short paceGm(byte p1, byte[] buf, short outOff) {
+    if (pace == null) {
+      pace = KeyAgreement.getInstance(ALG_EC_PACE_GM, false);
+    }
+
+    ECPrivateKey key;
+    if (p1 == PACE_NO_K) {
+      key = transientWeiKey(false);
+    } else if (p1 == PACE_K8) {
+      key = transientWeiKey(true);
+    } else {
+      ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
+      return 0;
+    }
+
+    stage = STAGE_SET;
+    setWeiParameters(key, p1 == PACE_K8 ? (short) 8 : (short) 0);
+
+    stage = STAGE_INIT;
+    pace.init(key);
+
+    stage = STAGE_COMPUTE;
+    // S*G + H with H = G
+    return pace.generateSecret(WEI_G, (short) 0, (short) WEI_G.length, buf, outOff);
+  }
+
+  /**
+   * Returns a transient Wei25519 key. The cofactor-setting and never-set variants use separate
+   * objects, so a cofactor set by one probe cannot leak into the other.
+   */
+  private ECPrivateKey transientWeiKey(boolean setsCofactor) {
+    if (setsCofactor) {
+      if (weiTransient == null) {
+        weiTransient = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, (short) 256, false);
+      }
+      return weiTransient;
+    }
+
+    if (weiNoK == null) {
+      weiNoK = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, (short) 256, false);
+    }
+    return weiNoK;
+  }
+
+  /**
+   * Sets the Wei25519 domain parameters and SCALAR. A cofactor of 0 means setK is not called.
+   */
+  private static void setWeiParameters(ECPrivateKey key, short cofactor) {
     key.setFieldFP(WEI_P, (short) 0, (short) 32);
     key.setA(WEI_A, (short) 0, (short) 32);
     key.setB(WEI_B, (short) 0, (short) 32);
     key.setG(WEI_G, (short) 0, (short) WEI_G.length);
     key.setR(ED_L, (short) 0, (short) 32);
-    key.setK(p1 == WEI_TRANSIENT_K1 ? (short) 1 : (short) 8);
+    if (cofactor != 0) {
+      key.setK(cofactor);
+    }
     key.setS(SCALAR, (short) 0, (short) 32);
-
-    return scalarMult(key, WEI_G, buf, outOff);
   }
 
   private short secp256k1(byte[] buf, short outOff) {
