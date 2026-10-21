@@ -554,7 +554,14 @@ public class NoteStoreTest {
     assumeTrue(SIMULATOR);
     rig = Rig.simulator(null, true);
     rig.unlockEmpty();
-    store(bytes(noteSize(2)), tag(), new byte[16]);
+    byte[] note = bytes(noteSize(2));
+    int entry = store(note, tag(), new byte[16]);
+
+    // without a verified PIN the reset is refused (6985) and the notes stay
+    rig.cmdSet.select().checkOK();
+    assertEquals(SW_CONDITIONS, rig.cmdSet.factoryReset().getSw());
+    rig.unlock();
+    assertArrayEquals(note, readAll(entry, note.length));
 
     rig.cmdSet.select().checkOK();
     rig.cmdSet.autoOpenSecureChannel();
