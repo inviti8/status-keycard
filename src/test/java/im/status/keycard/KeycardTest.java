@@ -1216,7 +1216,156 @@ public class KeycardTest {
     response = cmdSet.exportBIP85(64, new KeyPath("m/83696968'/0'/0'").getData());
     assertEquals(0x9000, response.getSw());
     assertArrayEquals(expectedData, response.getData());
-  }  
+  }
+
+  // Published BIP85 master key (bip-0085.mediawiki, "Test vectors"), decoded here rather than transcribed.
+  static final String BIP85_XPRV = "xprv9s21ZrQH143K2LBWUUQRFXhucrQqBpKdRRxNVq2zBqsx8HVqFk2uYo8kmbaLLHRdqtQpUm98uKfu3vca1LqdGhUtyoFnCNkfmXRyPXLjbKb";
+
+  /**
+   * Independent BIP85: BIP32 derivation by bitcoinj, then HMAC-SHA512("bip-entropy-from-k", k) by
+   * BouncyCastle, truncated to len bytes. Shares no code with the applet.
+   */
+  static DeterministicKey bip32Derive(DeterministicKey master, String path) {
+    DeterministicKey k = master;
+    for (String c : path.substring(2).split("/")) {
+      boolean hardened = c.endsWith("'");
+      long idx = Long.parseLong(hardened ? c.substring(0, c.length() - 1) : c);
+      k = HDKeyDerivation.deriveChildKey(k, new ChildNumber((int) idx, hardened));
+    }
+    return k;
+  }
+
+  static byte[] bip85Reference(DeterministicKey master, String path, int len) {
+    DeterministicKey k = bip32Derive(master, path);
+    org.bouncycastle.crypto.macs.HMac hmac = new org.bouncycastle.crypto.macs.HMac(new org.bouncycastle.crypto.digests.SHA512Digest());
+    hmac.init(new org.bouncycastle.crypto.params.KeyParameter("bip-entropy-from-k".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+    byte[] priv = k.getPrivKeyBytes();
+    hmac.update(priv, 0, priv.length);
+    byte[] out = new byte[64];
+    hmac.doFinal(out, 0);
+    return Arrays.copyOf(out, len);
+  }
+
+  static DeterministicKey bip85Master() {
+    return DeterministicKey.deserializeB58(null, BIP85_XPRV, org.bitcoinj.params.MainNetParams.get());
+  }
+
+  void loadBip85Master(DeterministicKey master) throws Exception {
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.loadKey(new BIP32KeyPair(master.getPrivKeyBytes(), master.getChainCode(), null)).getSw());
+  }
+
+  byte[] cardBip85(String path, int len) throws Exception {
+    APDUResponse response = cmdSet.exportBIP85(len, new KeyPath(path).getData());
+    assertEquals(0x9000, response.getSw(), path + " len " + len);
+    return response.getData();
+  }
+
+  @Test
+  @DisplayName("BIP85 published vectors: both raw cases and the 12/18/24-word BIP39 application, to the word")
+  void bip85PublishedVectorsTest() throws Exception {
+    DeterministicKey master = bip85Master();
+
+    // The reference implementation must reproduce the published derived keys before it is trusted
+    assertEquals("cca20ccb0e9a90feb0912870c3323b24874b0ca3d8018c4b96d0b97c0e82ded0",
+        Hex.toHexString(bip32Derive(master, "m/83696968'/0'/0'").getPrivKeyBytes()));
+    assertEquals("503776919131758bb7de7beb6c0ae24894f4ec042c26032890c29359216e21ba",
+        Hex.toHexString(bip32Derive(master, "m/83696968'/0'/1'").getPrivKeyBytes()));
+
+    loadBip85Master(master);
+
+    String[][] raw = {
+        {"m/83696968'/0'/0'", "efecfbccffea313214232d29e71563d941229afb4338c21f9517c41aaa0d16f00b83d2a09ef747e7a64e8e2bd5a14869e693da66ce94ac2da570ab7ee48618f7"},
+        {"m/83696968'/0'/1'", "70c6e3e8ebee8dc4c0dbba66076819bb8c09672527c4277ca8729532ad711872218f826919f6b67218adde99018a6df9095ab2b58d803b5b93ec9802085a690e"}};
+    for (String[] v : raw) {
+      assertEquals(v[1], Hex.toHexString(cardBip85(v[0], 64)), v[0]);
+      assertEquals(v[1], Hex.toHexString(bip85Reference(master, v[0], 64)), "reference " + v[0]);
+    }
+
+    // BIP39 application, English (language 0'): entropy truncated to 16/24/32 bytes
+    String[][] bip39 = {
+        {"12", "6250b68daf746d12a24d58b4787a714b", "girl mad pet galaxy egg matter matrix prison refuse sense ordinary nose"},
+        {"18", "938033ed8b12698449d4bbca3c853c66b293ea1b1ce9d9dc", "near account window bike charge season chef number sketch tomorrow excuse sniff circle vital hockey outdoor supply token"},
+        {"24", "ae131e2312cdc61331542efe0d1077bac5ea803adf24b313a4f0e48e9c51f37f", "puppy ocean match cereal symbol another shed magic wrap hammer bulb intact gadget divorce twin tonight reason outdoor destroy simple truth cigar social volcano"}};
+    for (String[] v : bip39) {
+      String path = "m/83696968'/39'/0'/" + v[0] + "'/0'";
+      int len = Integer.parseInt(v[0]) * 4 / 3;
+      byte[] entropy = cardBip85(path, len);
+      assertEquals(v[1], Hex.toHexString(entropy), path);
+      assertEquals(v[2], String.join(" ", MnemonicCode.INSTANCE.toMnemonic(entropy)), path + " mnemonic");
+    }
+  }
+
+  @Test
+  @DisplayName("BIP85 card vs independent reference: many paths, indexes, depths and every output length")
+  void bip85CrossCheckTest() throws Exception {
+    DeterministicKey master = bip85Master();
+    loadBip85Master(master);
+
+    java.util.List<String[]> cases = new java.util.ArrayList<>();
+    for (String words : new String[] {"12", "18", "24"}) {
+      for (String index : new String[] {"0", "1", "2", "1000", "2147483647"}) {
+        cases.add(new String[] {"m/83696968'/39'/0'/" + words + "'/" + index + "'", Integer.toString(Integer.parseInt(words) * 4 / 3)});
+      }
+    }
+    cases.add(new String[] {"m/83696968'/39'/1'/12'/0'", "16"});          // non-English language code
+    cases.add(new String[] {"m/83696968'/2'/0'", "32"});                  // WIF
+    cases.add(new String[] {"m/83696968'/32'/0'", "64"});                 // XPRV
+    for (String bytes : new String[] {"16", "32", "64"}) {
+      cases.add(new String[] {"m/83696968'/128169'/" + bytes + "'/0'", bytes}); // HEX
+    }
+    cases.add(new String[] {"m/83696968'/1'/2'/3'/4'/5'/6'/7'/8'/9'", "64"}); // maximum depth (10)
+
+    for (String[] c : cases) {
+      int len = Integer.parseInt(c[1]);
+      assertArrayEquals(bip85Reference(master, c[0], len), cardBip85(c[0], len), c[0]);
+    }
+
+    // Truncation keeps the leading bytes, for every allowed length
+    byte[] full = bip85Reference(master, "m/83696968'/0'/0'", 64);
+    for (int len = 1; len <= 64; len++) {
+      assertArrayEquals(Arrays.copyOf(full, len), cardBip85("m/83696968'/0'/0'", len), "len " + len);
+    }
+  }
+
+  @Test
+  @DisplayName("BIP85 from a seed loaded with LOAD KEY P1=SEED matches the reference (the production path)")
+  void bip85FromSeedTest() throws Exception {
+    // A BIP85-derived phrase used as a root, as the recovery flow would
+    String phrase = "girl mad pet galaxy egg matter matrix prison refuse sense ordinary nose";
+    byte[] seed = MnemonicCode.toSeed(Arrays.asList(phrase.split(" ")), "");
+    DeterministicKey master = HDKeyDerivation.createMasterPrivateKey(seed);
+
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.loadKey(seed).getSw());
+
+    for (String path : new String[] {"m/83696968'/39'/0'/12'/0'", "m/83696968'/39'/0'/24'/3'", "m/83696968'/0'/0'"}) {
+      int len = path.contains("/12'/") ? 16 : path.contains("/24'/") ? 32 : 64;
+      assertArrayEquals(bip85Reference(master, path, len), cardBip85(path, len), path);
+    }
+  }
+
+  @Test
+  @DisplayName("BIP85 rejects non-hardened components, foreign roots, too-deep paths and bad lengths")
+  void bip85RejectsTest() throws Exception {
+    loadBip85Master(bip85Master());
+
+    assertEquals(0x6a80, cmdSet.exportBIP85(16, new KeyPath("m/83696968'/39'/0'/12'/0").getData()).getSw());
+    assertEquals(0x6a80, cmdSet.exportBIP85(16, new KeyPath("m/83696968'/39/0'/12'/0'").getData()).getSw());
+    assertEquals(0x6a80, cmdSet.exportBIP85(16, new KeyPath("m/44'/39'/0'/12'/0'").getData()).getSw());
+    assertEquals(0x6a80, cmdSet.exportBIP85(16, new KeyPath("m/83696968'").getData()).getSw());
+    // 11 hardened components, one past KEY_PATH_MAX_DEPTH; built by hand because KeyPath refuses it
+    ByteBuffer tooDeep = ByteBuffer.allocate(11 * 4);
+    tooDeep.putInt(0x80000000 | 83696968);
+    for (int i = 1; i <= 10; i++) {
+      tooDeep.putInt(0x80000000 | i);
+    }
+    assertNotEquals(0x9000, cmdSet.exportBIP85(64, tooDeep.array()).getSw());
+    assertEquals(0x6a86, cmdSet.exportBIP85(0, new KeyPath("m/83696968'/0'/0'").getData()).getSw());
+    assertEquals(0x6a86, cmdSet.exportBIP85(65, new KeyPath("m/83696968'/0'/0'").getData()).getSw());
+  }
 
   @Test
   @DisplayName("STORE/GET DATA")
