@@ -239,6 +239,13 @@ public class KeycardApplet extends Applet {
     apdu.setIncomingAndReceive();
     byte[] apduBuffer = apdu.getBuffer();
 
+    // FACTORY RESET is sent in plain, so its status word must be too: inside the try block below, an open secure
+    // channel would wrap a refusal in an encrypted response with an outer 9000, indistinguishable from success.
+    if (apduBuffer[ISO7816.OFFSET_INS] == INS_FACTORY_RESET) {
+      factoryReset(apdu);
+      return;
+    }
+
     try {
       switch (apduBuffer[ISO7816.OFFSET_INS]) {
         case SecureChannelV2.INS_OPEN_SECURE_CHANNEL:
@@ -248,9 +255,6 @@ public class KeycardApplet extends Applet {
           secureChannel.preprocessAPDU(apduBuffer);
           processSecured(apdu);
           break;
-      case INS_FACTORY_RESET:
-          factoryReset(apdu);
-          return;          
         default:
           ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
           break;
@@ -978,11 +982,35 @@ public class KeycardApplet extends Applet {
     clearKeys();
   }
 
+  /**
+   * A factory reset destroys the keys, so it must not be available to anyone merely holding (or tapping) the card.
+   * It is allowed when the card holds nothing to protect (not initialized), when the active PIN has been verified
+   * (main or duress, so that the duress PIN stays indistinguishable), or when both PIN and PUK are blocked, i.e. the
+   * keys are already permanently unusable and a reset only makes the card reusable.
+   *
+   * @return whether FACTORY RESET may proceed
+   */
+  private boolean factoryResetAllowed() {
+    if (pin == null) {
+      return true;
+    }
+
+    if (pin.isValidated()) {
+      return true;
+    }
+
+    return (pin.getTriesRemaining() == 0) && (puk.getTriesRemaining() == 0);
+  }
+
   private void factoryReset(APDU apdu) {
     byte[] apduBuffer = apdu.getBuffer();
 
     if ((apduBuffer[OFFSET_P1] != FACTORY_RESET_P1_MAGIC) || (apduBuffer[OFFSET_P2] != FACTORY_RESET_P2_MAGIC)) {
       ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
+    }
+
+    if (!factoryResetAllowed()) {
+      ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
     }
 
     clearKeys();

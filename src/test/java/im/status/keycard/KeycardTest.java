@@ -459,7 +459,10 @@ public class KeycardTest {
     resetAndSelectAndOpenSC();
 
     if (cmdSet.getApplicationInfo().hasFactoryResetCapability()) {
-      // Factory reset and re-init to start from a known, clean state.
+      // Factory reset and re-init to start from a known, clean state. FACTORY RESET needs a verified PIN, so
+      // unblock (which also verifies the new PIN) first.
+      response = cmdSet.unblockPIN("012345678901", "000000");
+      assertEquals(0x9000, response.getSw());
       response = cmdSet.factoryReset();
       assertEquals(0x9000, response.getSw());
       cmdSet.select().checkOK();
@@ -525,7 +528,9 @@ public class KeycardTest {
       response = cmdSet.verifyPIN("000000");
       assertEquals(0x6300, response.getSw() & 0xFF00);
 
-      // Leave the card in a clean, initialized state for subsequent tests.
+      // Leave the card in a clean, initialized state for subsequent tests (FACTORY RESET needs a verified PIN).
+      response = cmdSet.verifyPIN("135790");
+      assertEquals(0x9000, response.getSw());
       response = cmdSet.factoryReset();
       assertEquals(0x9000, response.getSw());
       cmdSet.select().checkOK();
@@ -867,7 +872,50 @@ public class KeycardTest {
     APDUResponse response = sdkChannel.send(new APDUCommand(0x80, KeycardApplet.INS_FACTORY_RESET, 0, 0, new byte[0]));
     assertEquals(0x6a86, response.getSw());
 
-    // Good case
+    // Initialized card with a key, PIN not verified: refused, and nothing is wiped
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
+    resetAndSelectAndOpenSC();
+    response = cmdSet.factoryReset();
+    assertEquals(0x6985, response.getSw());
+    assertTrue(cmdSet.getKeyInitializationStatus());
+
+    // A wrong PIN does not help
+    assertEquals(0x63c2, cmdSet.verifyPIN("999999").getSw());
+    assertEquals(0x6985, cmdSet.factoryReset().getSw());
+
+    // Duress (alt) PIN verified: allowed, so the duress PIN stays indistinguishable from the main PIN
+    assertEquals(0x9000, cmdSet.verifyPIN("024680").getSw());
+    response = cmdSet.factoryReset();
+    assertEquals(0x9000, response.getSw());
+
+    response = cmdSet.select();
+    assertEquals(0x9000, response.getSw());
+    assertFalse(cmdSet.getApplicationInfo().isInitializedCard());
+
+    // Not initialized: allowed (nothing to protect)
+    assertEquals(0x9000, cmdSet.factoryReset().getSw());
+    cmdSet.select().checkOK();
+
+    // PIN and PUK both blocked: the keys are already unusable, so a reset is allowed without a PIN
+    initCard(cmdSet);
+    cmdSet.autoOpenSecureChannel();
+    for (int i = 0; i < 3; i++) {
+      cmdSet.verifyPIN("999999");
+    }
+    assertEquals(0x6985, cmdSet.factoryReset().getSw()); // PUK still has tries left
+    for (int i = 0; i < 5; i++) {
+      cmdSet.unblockPIN("999999999999", "000000");
+    }
+    assertEquals(0x9000, cmdSet.factoryReset().getSw());
+    cmdSet.select().checkOK();
+    assertFalse(cmdSet.getApplicationInfo().isInitializedCard());
+
+    // Main PIN verified: allowed (the good case)
+    initCard(cmdSet);
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
     response = cmdSet.factoryReset();
     assertEquals(0x9000, response.getSw());
 
