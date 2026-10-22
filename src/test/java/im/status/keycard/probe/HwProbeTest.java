@@ -146,7 +146,7 @@ public class HwProbeTest {
 
     // jcardsim implements no ALG_EC_PACE_GM, so this exercises the exception path. The result
     // comparison is the same arrayCompare the passing Wei25519 probes use.
-    for (byte variant : new byte[] {HwProbeApplet.PACE_NO_K, HwProbeApplet.PACE_K8}) {
+    for (byte variant : new byte[] {HwProbeApplet.PACE_NO_K, HwProbeApplet.PACE_K8, HwProbeApplet.PACE_K1}) {
       assertArrayEquals(new byte[] {HwProbeApplet.STATUS_EXCEPTION, HwProbeApplet.STAGE_ALLOCATE,
           HwProbeApplet.EXC_CRYPTO, 0, CryptoException.NO_SUCH_ALGORITHM, 0}, run(HwProbeApplet.INS_PACE_GM, variant), "variant " + variant);
     }
@@ -177,7 +177,8 @@ public class HwProbeTest {
         {HwProbeApplet.INS_WEI25519, HwProbeApplet.WEI_TRANSIENT_NO_K},
         {HwProbeApplet.INS_SECP256K1, 0},
         {HwProbeApplet.INS_PACE_GM, HwProbeApplet.PACE_NO_K},
-        {HwProbeApplet.INS_PACE_GM, HwProbeApplet.PACE_K8}};
+        {HwProbeApplet.INS_PACE_GM, HwProbeApplet.PACE_K8},
+        {HwProbeApplet.INS_PACE_GM, HwProbeApplet.PACE_K1}};
     assertEquals(expectedIds.length * HwProbeApplet.SUMMARY_ROW_LEN, rows.length);
 
     for (int i = 0; i < expectedIds.length; i++) {

@@ -35,7 +35,7 @@ Package AID `F04B4350524F4245`, applet AID `F04B4350524F424501`.
     gp -d --apdu 00A4040009F04B4350524F424501 --apdu 0003000000 --apdu 0002000000
     gp --uninstall probe.cap
 
-`00 02 00 00 00` runs every probe and returns eleven 7-byte rows. Each probe can also be run on
+`00 02 00 00 00` runs every probe and returns twelve 7-byte rows. Each probe can also be run on
 its own to get its full output:
 
 | APDU             | Probe                                                               |
@@ -53,6 +53,7 @@ its own to get its full output:
 | `00 30 00 00 00` | control: secp256k1                                                  |
 | `00 40 00 00 00` | `ALG_EC_PACE_GM` on Wei25519, cofactor never set                    |
 | `00 40 01 00 00` | `ALG_EC_PACE_GM` on Wei25519, cofactor 8                            |
+| `00 40 02 00 00` | `ALG_EC_PACE_GM` on Wei25519, cofactor 1                            |
 
 Every probe answers SW `9000`.
 
@@ -72,11 +73,12 @@ A fully passing card returns, for `00 02 00 00 00`:
 
     10 00 00 04 00 00 00   11 00 00 04 00 00 00   12 00 00 04 00 00 00   12 01 00 04 00 00 00
     20 00 00 04 00 00 00   20 01 00 04 00 00 00   20 02 00 04 00 00 00   20 03 00 04 00 00 00
-    30 00 00 04 00 00 00   40 00 00 04 00 00 00   40 01 00 04 00 00 00   90 00
+    30 00 00 04 00 00 00   40 00 00 04 00 00 00   40 01 00 04 00 00 00   40 02 00 04 00 00 00
+    90 00
 
 The 512-bit inversion check matches the value, not the length. A card returning fewer than 64 bytes
 still passes, and the length is visible in `outLen` when the probe is run on its own.
 
-The simulator (jcardsim) has no `ALG_EC_PACE_GM`, so there both `40` rows read
+The simulator (jcardsim) has no `ALG_EC_PACE_GM`, so there all three `40` rows read
 `02 01 01 00 03` (CryptoException NO_SUCH_ALGORITHM at allocation). Their expected value is
 cross-checked against BouncyCastle in `HwProbeTest`.

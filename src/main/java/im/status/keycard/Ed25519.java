@@ -6,7 +6,7 @@ import javacard.security.ECKey;
 import javacard.security.ECPrivateKey;
 import javacard.security.KeyAgreement;
 import javacard.security.KeyBuilder;
-import javacard.security.RSAPublicKey;
+import javacard.security.RSAPrivateKey;
 import javacardx.crypto.Cipher;
 
 /**
@@ -19,8 +19,10 @@ import javacardx.crypto.Cipher;
  *
  * Support needed from the platform:
  *  - KeyAgreement ALG_EC_SVDP_DH_PLAIN_XY (JavaCard 3.0.5) with custom Fp curve parameters
- *  - raw RSA (ALG_RSA_NOPAD) with a 256-bit public key and arbitrary exponent, used for the
- *    modular inversion mod p as x^(p-2) (Fermat), one cipher operation per inversion
+ *  - raw RSA (ALG_RSA_NOPAD) with a 512-bit private key whose modulus is p zero-padded to 64 bytes
+ *    and whose exponent is p-2, used for the modular inversion mod p as x^(p-2) (Fermat), one
+ *    cipher operation per inversion. JCOP4 P71 refuses 256-bit RSA keys and rejects the padded
+ *    modulus on a public key; this is JCMathLib's RSA_RESIZE_MOD configuration for that chip.
  *  - BigNumberMath (keycard-math) for modular add/sub/mul/reduce on 256-bit operands
  *
  * All BigNumberMath state is big-endian; RFC 8032 wire format is little-endian. Byte order is
@@ -123,14 +125,17 @@ class Ed25519 {
   private static final short T2_OFF = 289;         // field element temp
   private static final short H64_OFF = 321;        // SHA-512 output staging (64)
   private static final short HASH_OFF = 385;       // input hash copy (32)
-  private static final short WORK_SIZE = 417;
+  private static final short INV_OFF = 417;        // 64-byte RSA block for modInv
+  private static final short WORK_SIZE = 481;
+
+  private static final short INV_BLOCK = 64;
 
   private static final short POINT_X = POINT_OFF + 1;
   private static final short POINT_Y = POINT_OFF + 33;
 
   private KeyAgreement multiplier;
   private ECPrivateKey weiKey;
-  private RSAPublicKey invKey;
+  private RSAPrivateKey invKey;
   private Cipher invCipher;
   private byte[] work;
 
@@ -140,11 +145,14 @@ class Ed25519 {
   Ed25519() {
     multiplier = KeyAgreement.getInstance(ALG_EC_SVDP_DH_PLAIN_XY, false);
     weiKey = (ECPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_EC_FP_PRIVATE_TRANSIENT_DESELECT, (short) 256, false);
-    invKey = (RSAPublicKey) KeyBuilder.buildKey(KeyBuilder.TYPE_RSA_PUBLIC, (short) 256, false);
-    invKey.setModulus(WEI_P, (short) 0, (short) 32);
+    work = JCSystem.makeTransientByteArray(WORK_SIZE, JCSystem.CLEAR_ON_DESELECT);
+    invKey = (RSAPrivateKey) KeyBuilder.buildKey(KeyBuilder.TYPE_RSA_PRIVATE, KeyBuilder.LENGTH_RSA_512, false);
+    // modulus: 32 zero bytes || p
+    Util.arrayFillNonAtomic(work, INV_OFF, (short) 32, (byte) 0);
+    Util.arrayCopyNonAtomic(WEI_P, (short) 0, work, (short) (INV_OFF + 32), (short) 32);
+    invKey.setModulus(work, INV_OFF, INV_BLOCK);
     invKey.setExponent(P_MINUS_2, (short) 0, (short) 32);
     invCipher = Cipher.getInstance(Cipher.ALG_RSA_NOPAD, false);
-    work = JCSystem.makeTransientByteArray(WORK_SIZE, JCSystem.CLEAR_ON_DESELECT);
   }
 
   /**
@@ -160,7 +168,9 @@ class Ed25519 {
     key.setB(WEI_B, (short) 0, (short) 32);
     key.setG(WEI_G, (short) 0, (short) WEI_G.length);
     key.setR(ED_L, (short) 0, (short) 32);
-    key.setK((short) 8);
+    // JCOP4 P71 rejects cofactor 8 on this curve (ILLEGAL_VALUE at init); ALG_EC_SVDP_DH_PLAIN_XY
+    // does not use the cofactor, so 1 yields the same [s]P
+    key.setK((short) 1);
   }
 
   /**
@@ -336,13 +346,17 @@ class Ed25519 {
    * computed as x^(p-2) mod p with a single raw RSA operation.
    */
   private void modInv(short off) {
+    Util.arrayFillNonAtomic(work, INV_OFF, (short) 32, (byte) 0);
+    Util.arrayCopyNonAtomic(work, off, work, (short) (INV_OFF + 32), (short) 32);
     invCipher.init(invKey, Cipher.MODE_DECRYPT);
-    short len = invCipher.doFinal(work, off, (short) 32, work, off);
+    short len = invCipher.doFinal(work, INV_OFF, INV_BLOCK, work, INV_OFF);
 
-    if (len < 32) {
-      // some implementations strip leading zeroes
-      Util.arrayCopyNonAtomic(work, off, work, (short) (off + 32 - len), len);
+    // the result is < p, so it fits the low 32 bytes; some implementations strip leading zeroes
+    if (len > 32) {
+      Util.arrayCopyNonAtomic(work, (short) (INV_OFF + len - 32), work, off, (short) 32);
+    } else {
       Util.arrayFillNonAtomic(work, off, (short) (32 - len), (byte) 0);
+      Util.arrayCopyNonAtomic(work, INV_OFF, work, (short) (off + 32 - len), len);
     }
   }
 

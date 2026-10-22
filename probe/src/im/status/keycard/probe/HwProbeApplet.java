@@ -33,7 +33,8 @@ import javacardx.crypto.Cipher;
  *   INS 0x30  Control: ALG_EC_SVDP_DH_PLAIN_XY on secp256k1 (known to work on JCOP: stock Keycard).
  *   INS 0x40  ALG_EC_PACE_GM (S*G + H, JCMathLib's hardware point addition) on Wei25519, computing
  *             SCALAR*G + G. Needed for a cheap on-card verify-after-sign. P1 selects the key:
- *             0x00 = transient, cofactor never set (JCMathLib's config), 0x01 = transient, cofactor 8
+ *             0x00 = transient, cofactor never set (JCMathLib's config), 0x01 = transient, cofactor 8,
+ *             0x02 = transient, cofactor 1 (the only Wei25519 cofactor JCOP4 P71 accepts for PLAIN_XY)
  *   INS 0x01  Info: JCSystem.getVersion() and the probe version.
  *   INS 0x03  Free memory, as three 4-byte big-endian ints (JCSystem.getAvailableMemory, the
  *             JC 3.0.4 overload that is not capped at 32767): persistent, transient reset,
@@ -76,6 +77,7 @@ public class HwProbeApplet extends Applet {
 
   static final byte PACE_NO_K = 0x00;
   static final byte PACE_K8 = 0x01;
+  static final byte PACE_K1 = 0x02;
 
   static final byte STATUS_PASS = 0x00;
   static final byte STATUS_WRONG_RESULT = 0x01;
@@ -326,6 +328,7 @@ public class HwProbeApplet extends Applet {
     off = summaryRow(INS_SECP256K1, (byte) 0, buf, off);
     off = summaryRow(INS_PACE_GM, PACE_NO_K, buf, off);
     off = summaryRow(INS_PACE_GM, PACE_K8, buf, off);
+    off = summaryRow(INS_PACE_GM, PACE_K1, buf, off);
     return off;
   }
 
@@ -516,7 +519,7 @@ public class HwProbeApplet extends Applet {
     ECPrivateKey key;
     if (p1 == PACE_NO_K) {
       key = transientWeiKey(false);
-    } else if (p1 == PACE_K8) {
+    } else if (p1 == PACE_K8 || p1 == PACE_K1) {
       key = transientWeiKey(true);
     } else {
       ISOException.throwIt(ISO7816.SW_INCORRECT_P1P2);
@@ -524,7 +527,7 @@ public class HwProbeApplet extends Applet {
     }
 
     stage = STAGE_SET;
-    setWeiParameters(key, p1 == PACE_K8 ? (short) 8 : (short) 0);
+    setWeiParameters(key, p1 == PACE_K8 ? (short) 8 : p1 == PACE_K1 ? (short) 1 : (short) 0);
 
     stage = STAGE_INIT;
     pace.init(key);
