@@ -13,12 +13,8 @@ public class CashApplet extends Applet {
   private ECPublicKey publicKey;
   private ECPrivateKey privateKey;
 
-  // random-at-install Ed25519 (Stellar) secret, analogous to the secp256k1 keypair
-  private byte[] edSecret;
-
   private Crypto crypto;
   private SECP256k1 secp256k1;
-  private Ed25519 ed25519;
 
 
   /**
@@ -46,7 +42,6 @@ public class CashApplet extends Applet {
   public CashApplet(byte[] bArray, short bOffset, byte bLength) {
     crypto = new Crypto();
     secp256k1 = new SECP256k1();
-    ed25519 = new Ed25519();
 
     keypair = new KeyPair(KeyPair.ALG_EC_FP, SECP256k1.SECP256K1_KEY_SIZE);
     publicKey = (ECPublicKey) keypair.getPublic();
@@ -54,9 +49,6 @@ public class CashApplet extends Applet {
     SECP256k1.setCurveParameters(publicKey);
     SECP256k1.setCurveParameters(privateKey);
     keypair.genKeyPair();
-
-    edSecret = new byte[Ed25519.ED25519_KEY_SIZE];
-    crypto.random.generateData(edSecret, (short) 0, Ed25519.ED25519_KEY_SIZE);
 
     short c9Off = (short)(bOffset + bArray[bOffset] + 1); // Skip AID
     c9Off += (short)(bArray[c9Off] + 1); // Skip Privileges and parameter length
@@ -75,7 +67,6 @@ public class CashApplet extends Applet {
     // Since selection can happen not only by a SELECT command, we check for that separately.
     if (selectingApplet()) {
       secp256k1.onSelect();
-      ed25519.onSelect();
       selectApplet(apdu);
       return;
     }
@@ -132,26 +123,14 @@ public class CashApplet extends Applet {
 
     apduBuffer[SIGN_OUT_OFF] = KeycardApplet.TLV_SIGNATURE_TEMPLATE;
     apduBuffer[(short) (SIGN_OUT_OFF + 3)] = KeycardApplet.TLV_PUB_KEY;
-    short outLen;
+    short outLen = apduBuffer[(short) (SIGN_OUT_OFF + 4)] = Crypto.KEY_PUB_SIZE;
 
-    if (apduBuffer[OFFSET_P2] == SECP256k1.SIGN_ED25519) {
-      apduBuffer[(short) (SIGN_OUT_OFF + 4)] = (byte) Ed25519.ED25519_KEY_SIZE;
-      short pubOff = (short) (SIGN_OUT_OFF + 5);
-      short sigOff = (short) (pubOff + Ed25519.ED25519_KEY_SIZE);
-      ed25519.signHash(crypto, edSecret, (short) 0, apduBuffer, ISO7816.OFFSET_CDATA, apduBuffer, pubOff, apduBuffer, (short) (sigOff + 2));
-      apduBuffer[sigOff] = SECP256k1.TLV_RAW_SIGNATURE;
-      apduBuffer[(short) (sigOff + 1)] = (byte) Ed25519.ED25519_SIG_SIZE;
-      outLen = (short) (5 + Ed25519.ED25519_KEY_SIZE + 2 + Ed25519.ED25519_SIG_SIZE);
-    } else {
-      outLen = apduBuffer[(short) (SIGN_OUT_OFF + 4)] = Crypto.KEY_PUB_SIZE;
+    publicKey.getW(apduBuffer, (short) (SIGN_OUT_OFF + 5));
 
-      publicKey.getW(apduBuffer, (short) (SIGN_OUT_OFF + 5));
+    outLen += 5;
+    short sigOff = (short) (SIGN_OUT_OFF + outLen);
 
-      outLen += 5;
-      short sigOff = (short) (SIGN_OUT_OFF + outLen);
-
-      outLen += secp256k1.signHash(apduBuffer[OFFSET_P2], crypto, privateKey, apduBuffer, ISO7816.OFFSET_CDATA, apduBuffer, sigOff);
-    }
+    outLen += secp256k1.signHash(apduBuffer[OFFSET_P2], crypto, privateKey, apduBuffer, ISO7816.OFFSET_CDATA, apduBuffer, sigOff);
 
     apduBuffer[(short) (SIGN_OUT_OFF + 1)] = (byte) 0x81;
     apduBuffer[(short) (SIGN_OUT_OFF + 2)] = (byte) (outLen - 3);

@@ -1536,42 +1536,6 @@ public class KeycardTest {
   }
 
   @Test
-  @DisplayName("Cash applet Ed25519 signing")
-  void cashEd25519Test() throws Exception {
-    CashCommandSet cashCmdSet = new CashCommandSet(sdkChannel);
-    APDUResponse response = cashCmdSet.select();
-    assertEquals(0x9000, response.getSw());
-
-    byte[] hash = sha256("cash stellar tx".getBytes());
-
-    // Ed25519 sign (P2 = 0x01), no PIN or secure channel on the Cash applet
-    response = sdkChannel.send(new APDUCommand(0x80, KeycardApplet.INS_SIGN, 0x00, SECP256k1.SIGN_ED25519, hash));
-    assertEquals(0x9000, response.getSw());
-
-    byte[] pubKey = extractPublicKeyFromSignature(response.getData());
-    assertEquals(32, pubKey.length);
-    byte[] sigTlv = extractSignature(response.getData());
-    assertEquals((byte) 0x88, sigTlv[0]);
-    assertEquals((byte) 64, sigTlv[1]);
-    byte[] sig = Arrays.copyOfRange(sigTlv, 2, 66);
-
-    Ed25519Signer verifier = new Ed25519Signer();
-    verifier.init(false, new Ed25519PublicKeyParameters(pubKey, 0));
-    verifier.update(hash, 0, hash.length);
-    assertTrue(verifier.verifySignature(sig), "Cash applet Ed25519 signature must verify");
-
-    // stable key: signing again reports the same public key
-    response = sdkChannel.send(new APDUCommand(0x80, KeycardApplet.INS_SIGN, 0x00, SECP256k1.SIGN_ED25519, hash));
-    assertEquals(0x9000, response.getSw());
-    assertArrayEquals(pubKey, extractPublicKeyFromSignature(response.getData()));
-
-    // ECDSA signing still works
-    response = sdkChannel.send(new APDUCommand(0x80, KeycardApplet.INS_SIGN, 0x00, 0x00, hash));
-    assertEquals(0x9000, response.getSw());
-    assertEquals(65, extractPublicKeyFromSignature(response.getData()).length);
-  }
-
-  @Test
   @DisplayName("Mnemonic load and derivation")
   @Tag("manual")
   void mnemonicTest() throws Exception {
