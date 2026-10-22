@@ -1222,6 +1222,57 @@ public class KeycardTest {
     assertArrayEquals(expectedPub, exportEd25519(stellarPath));
   }
 
+  @Test
+  @DisplayName("LOAD KEY with a 16- or 32-byte seed (e.g. a SLIP-39 master secret) gets the Ed25519 tree")
+  @Capabilities("credentialsManagement")
+  void ed25519ShortSeedTest() throws Exception {
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+
+    // SLIP-0010 test vector 1 (ed25519): seed 000102...0f, m/0' public key
+    byte[] vectorSeed = Hex.decode("000102030405060708090a0b0c0d0e0f");
+    assertEquals(0x9000, cmdSet.loadKey(vectorSeed).getSw());
+    assertArrayEquals(Hex.decode("8c8a13df77a28f3445213a0f432fde644acaa215fc72dcdf300d5efaa85d350c"),
+        exportEd25519(new byte[] {(byte) 0x80, 0x00, 0x00, 0x00}), "SLIP-0010 vector 1, m/0'");
+
+    // 16- and 32-byte seeds against an independent SLIP-0010 derivation, at a Stellar path
+    int[] path = {0x8000002C, 0x80000094, 0x80000003};
+    byte[] pathBytes = new byte[path.length * 4];
+    for (int i = 0; i < path.length; i++) {
+      pathBytes[i * 4] = (byte) (path[i] >> 24);
+      pathBytes[i * 4 + 1] = (byte) (path[i] >> 16);
+      pathBytes[i * 4 + 2] = (byte) (path[i] >> 8);
+      pathBytes[i * 4 + 3] = (byte) path[i];
+    }
+    for (int len : new int[] {16, 32}) {
+      byte[] seed = new byte[len];
+      new java.security.SecureRandom().nextBytes(seed);
+      assertEquals(0x9000, cmdSet.loadKey(seed).getSw());
+      assertArrayEquals(slip10Ed25519Public(seed, path), exportEd25519(pathBytes), len + "-byte seed");
+    }
+  }
+
+  /** SLIP-0010 ed25519, hardened only, computed with BouncyCastle (independent of the applet). */
+  private static byte[] slip10Ed25519Public(byte[] seed, int[] path) {
+    org.bouncycastle.crypto.macs.HMac hmac = new org.bouncycastle.crypto.macs.HMac(new org.bouncycastle.crypto.digests.SHA512Digest());
+    byte[] i = new byte[64];
+    hmac.init(new org.bouncycastle.crypto.params.KeyParameter("ed25519 seed".getBytes(java.nio.charset.StandardCharsets.US_ASCII)));
+    hmac.update(seed, 0, seed.length);
+    hmac.doFinal(i, 0);
+    for (int index : path) {
+      byte[] data = new byte[37];
+      System.arraycopy(i, 0, data, 1, 32);
+      data[33] = (byte) (index >> 24);
+      data[34] = (byte) (index >> 16);
+      data[35] = (byte) (index >> 8);
+      data[36] = (byte) index;
+      hmac.init(new org.bouncycastle.crypto.params.KeyParameter(Arrays.copyOfRange(i, 32, 64)));
+      hmac.update(data, 0, data.length);
+      hmac.doFinal(i, 0);
+    }
+    return new org.bouncycastle.crypto.params.Ed25519PrivateKeyParameters(i, 0).generatePublicKey().getEncoded();
+  }
+
   private byte[] exportEd25519(byte[] path) throws Exception {
     APDUResponse response = cmdSet.exportKey(path, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardApplet.EXPORT_KEY_P2_ED25519_PUBLIC);
     assertEquals(0x9000, response.getSw());
