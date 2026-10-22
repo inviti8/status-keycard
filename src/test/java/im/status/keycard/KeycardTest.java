@@ -475,7 +475,10 @@ public class KeycardTest {
     resetAndSelectAndOpenSC();
 
     if (cmdSet.getApplicationInfo().hasFactoryResetCapability()) {
-      // Factory reset and re-init to start from a known, clean state.
+      // Factory reset and re-init to start from a known, clean state. FACTORY RESET needs a verified PIN, so
+      // unblock (which also verifies the new PIN) first.
+      response = cmdSet.unblockPIN("012345678901", "000000");
+      assertEquals(0x9000, response.getSw());
       response = cmdSet.factoryReset();
       assertEquals(0x9000, response.getSw());
       cmdSet.select().checkOK();
@@ -541,7 +544,9 @@ public class KeycardTest {
       response = cmdSet.verifyPIN("000000");
       assertEquals(0x6300, response.getSw() & 0xFF00);
 
-      // Leave the card in a clean, initialized state for subsequent tests.
+      // Leave the card in a clean, initialized state for subsequent tests (FACTORY RESET needs a verified PIN).
+      response = cmdSet.verifyPIN("135790");
+      assertEquals(0x9000, response.getSw());
       response = cmdSet.factoryReset();
       assertEquals(0x9000, response.getSw());
       cmdSet.select().checkOK();
@@ -1177,6 +1182,50 @@ public class KeycardTest {
     // non-hardened path elements are invalid for ed25519 (SW_DATA_INVALID, same as failed BIP32 derivation)
     response = cmdSet.signWithPath(hash, "m/44'/148'/0", KeycardCommandSet.SIGN_P2_EDDSA_ED25519, false);
     assertEquals(0x6984, response.getSw());
+  }
+
+  @Test
+  @DisplayName("the duress PIN derives a separate (decoy) set of Ed25519 keys; the main PIN still gets SEP-0005")
+  @Capabilities("credentialsManagement")
+  void ed25519DuressTreeTest() throws Exception {
+    String mnemonic = "illness spike retreat truth genius clock brain pass fit cave bargain toe";
+    byte[] expectedPub = decodeStrkey("GDRXE2BQUC3AZNPVFSCEZ76NJ3WWL25FYFK6RGZGIEKWE4SOOHSUJUJ6");
+    byte[] seed = MnemonicCode.toSeed(Arrays.asList(mnemonic.split(" ")), "");
+    byte[] stellarPath = {(byte) 0x80, 0x00, 0x00, 0x2C, (byte) 0x80, 0x00, 0x00, (byte) 0x94, (byte) 0x80, 0x00, 0x00, 0x00};
+    byte[] hash = sha256("duress tree".getBytes());
+
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.loadKey(seed).getSw());
+    assertArrayEquals(expectedPub, exportEd25519(stellarPath));
+
+    // duress PIN: a different key at the same path, and SIGN agrees with EXPORT inside the decoy tree
+    assertEquals(0x9000, cmdSet.verifyPIN("024680").getSw());
+    byte[] decoyPub = exportEd25519(stellarPath);
+    assertFalse(Arrays.equals(expectedPub, decoyPub), "the duress PIN must not reach the real Ed25519 keys");
+    APDUResponse response = cmdSet.signWithPath(hash, "m/44'/148'/0'", KeycardCommandSet.SIGN_P2_EDDSA_ED25519, false);
+    assertEquals(0x9000, response.getSw());
+    assertArrayEquals(decoyPub, extractPublicKeyFromSignature(response.getData()));
+    Ed25519Signer verifier = new Ed25519Signer();
+    verifier.init(false, new Ed25519PublicKeyParameters(decoyPub, 0));
+    verifier.update(hash, 0, hash.length);
+    assertTrue(verifier.verifySignature(Arrays.copyOfRange(extractSignature(response.getData()), 2, 66)));
+
+    // the empty path would be the master key, the same in both trees: refused for both PINs
+    response = cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardApplet.EXPORT_KEY_P2_ED25519_PUBLIC);
+    assertEquals(0x6A80, response.getSw());
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    response = cmdSet.exportKey(new byte[0], KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardApplet.EXPORT_KEY_P2_ED25519_PUBLIC);
+    assertEquals(0x6A80, response.getSw());
+
+    // back on the main PIN: the real key again
+    assertArrayEquals(expectedPub, exportEd25519(stellarPath));
+  }
+
+  private byte[] exportEd25519(byte[] path) throws Exception {
+    APDUResponse response = cmdSet.exportKey(path, KeycardApplet.DERIVE_P1_SOURCE_MASTER, false, KeycardApplet.EXPORT_KEY_P2_ED25519_PUBLIC);
+    assertEquals(0x9000, response.getSw());
+    return Arrays.copyOfRange(response.getData(), 4, 36);
   }
 
   private byte[] decodeStrkey(String address) {

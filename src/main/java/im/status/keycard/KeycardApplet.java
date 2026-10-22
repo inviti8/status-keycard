@@ -45,6 +45,8 @@ public class KeycardApplet extends Applet {
   static final byte INS_NOTE_SET_META = (byte) 0xB7;
 
   static final byte NOTE_DELETE_P2_ABORT = 0x01;
+  static final byte NOTE_TREE_MAIN = 0;
+  static final byte NOTE_TREE_DURESS = 1;
   static final short NOTE_CHUNK = 240;
   // scratch space in the APDU buffer for the store's free-block bitmap and entry assembly, past any command data
   static final short NOTE_SCRATCH_OFF = 128;
@@ -167,6 +169,8 @@ public class KeycardApplet extends Applet {
   // since the raw seed itself is never persisted)
   private byte[] ed25519MasterKey;
   private byte[] ed25519MasterChainCode;
+  // the duress PIN's Ed25519 tree, as altChainCode is for BIP32: SHA-256 of the master chain code
+  private byte[] ed25519AltChainCode;
   private boolean hasEd25519Master;
 
   private byte[] tmpPath; // byte 0 = path length, bytes 1..N = path data
@@ -222,6 +226,7 @@ public class KeycardApplet extends Applet {
 
     ed25519MasterKey = new byte[Crypto.KEY_SECRET_SIZE];
     ed25519MasterChainCode = new byte[CHAIN_CODE_SIZE];
+    ed25519AltChainCode = new byte[CHAIN_CODE_SIZE];
     hasEd25519Master = false;
 
     tmpPath = JCSystem.makeTransientByteArray((short)(KEY_PATH_MAX_DEPTH * 4 + 1), JCSystem.CLEAR_ON_DESELECT);
@@ -407,6 +412,8 @@ public class KeycardApplet extends Applet {
       ISOException.throwIt(ISO7816.SW_FILE_NOT_FOUND);
     }
 
+    // the duress PIN sees its own (decoy) notes and none of the main PIN's
+    byte tree = (pin == altPIN) ? NOTE_TREE_DURESS : NOTE_TREE_MAIN;
     byte entry = apduBuffer[OFFSET_P1];
     short lc = (short) (apduBuffer[ISO7816.OFFSET_LC] & 0xFF);
     short metaLen = ns.metaLength();
@@ -414,25 +421,25 @@ public class KeycardApplet extends Applet {
 
     switch (apduBuffer[ISO7816.OFFSET_INS]) {
       case INS_NOTE_STATUS:
-        outLen = ns.status(apduBuffer, OFFSET_CDATA, NOTE_SCRATCH_OFF);
+        outLen = ns.status(tree, apduBuffer, OFFSET_CDATA, NOTE_SCRATCH_OFF);
         break;
       case INS_NOTE_LIST:
-        outLen = ns.list(entry, apduBuffer, OFFSET_CDATA, NOTE_CHUNK);
+        outLen = ns.list(tree, entry, apduBuffer, OFFSET_CDATA, NOTE_CHUNK);
         break;
       case INS_NOTE_BEGIN:
         checkNoteLength(lc, (short) (2 + 32 + metaLen));
-        apduBuffer[OFFSET_CDATA] = ns.begin(apduBuffer, OFFSET_CDATA, NOTE_SCRATCH_OFF);
+        apduBuffer[OFFSET_CDATA] = ns.begin(tree, apduBuffer, OFFSET_CDATA, NOTE_SCRATCH_OFF);
         outLen = 1;
         break;
       case INS_NOTE_WRITE:
         if (lc < 2) {
           ISOException.throwIt(ISO7816.SW_WRONG_DATA);
         }
-        ns.write(entry, Util.getShort(apduBuffer, OFFSET_CDATA), apduBuffer, (short) (OFFSET_CDATA + 2), (short) (lc - 2));
+        ns.write(tree, entry, Util.getShort(apduBuffer, OFFSET_CDATA), apduBuffer, (short) (OFFSET_CDATA + 2), (short) (lc - 2));
         break;
       case INS_NOTE_COMMIT:
         checkNoteLength(lc, MessageDigest.LENGTH_SHA_256);
-        noteCommit(apduBuffer, ns, entry);
+        noteCommit(apduBuffer, ns, tree, entry);
         break;
       case INS_NOTE_READ:
         checkNoteLength(lc, (short) 3);
@@ -440,15 +447,15 @@ public class KeycardApplet extends Applet {
         if (readLen > NOTE_CHUNK) {
           ISOException.throwIt(ISO7816.SW_WRONG_DATA);
         }
-        outLen = ns.read(entry, true, Util.getShort(apduBuffer, OFFSET_CDATA), apduBuffer, OFFSET_CDATA, readLen);
+        outLen = ns.read(tree, entry, true, Util.getShort(apduBuffer, OFFSET_CDATA), apduBuffer, OFFSET_CDATA, readLen);
         break;
       case INS_NOTE_DELETE:
         checkNoteLength(lc, (short) 32);
-        ns.delete(entry, apduBuffer[OFFSET_P2] == NOTE_DELETE_P2_ABORT, apduBuffer, OFFSET_CDATA);
+        ns.delete(tree, entry, apduBuffer[OFFSET_P2] == NOTE_DELETE_P2_ABORT, apduBuffer, OFFSET_CDATA);
         break;
       case INS_NOTE_SET_META:
         checkNoteLength(lc, (short) (32 + metaLen));
-        ns.setMeta(entry, apduBuffer, OFFSET_CDATA);
+        ns.setMeta(tree, entry, apduBuffer, OFFSET_CDATA);
         break;
     }
 
@@ -464,14 +471,14 @@ public class KeycardApplet extends Applet {
   /**
    * Hashes a WRITING note through the APDU buffer and flips it to HELD if the hash matches the one sent.
    */
-  private void noteCommit(byte[] apduBuffer, NoteStore ns, byte entry) {
+  private void noteCommit(byte[] apduBuffer, NoteStore ns, byte tree, byte entry) {
     Util.arrayCopyNonAtomic(apduBuffer, OFFSET_CDATA, crypto.scratch, (short) 0, MessageDigest.LENGTH_SHA_256);
-    short len = ns.length(entry, false);
+    short len = ns.length(tree, entry, false);
 
     crypto.sha256.reset();
     short off = 0;
     while (off < len) {
-      short n = ns.read(entry, false, off, apduBuffer, OFFSET_CDATA, NOTE_CHUNK);
+      short n = ns.read(tree, entry, false, off, apduBuffer, OFFSET_CDATA, NOTE_CHUNK);
       crypto.sha256.update(apduBuffer, OFFSET_CDATA, n);
       off += n;
     }
@@ -481,7 +488,7 @@ public class KeycardApplet extends Applet {
       ISOException.throwIt(ISO7816.SW_WRONG_DATA);
     }
 
-    ns.commit(entry);
+    ns.commit(tree, entry);
   }
 
   private void handleException(APDU apdu, short sw) {
@@ -527,6 +534,12 @@ public class KeycardApplet extends Applet {
     } else {
       pinLimit = DEFAULT_PIN_MAX_RETRIES;
       pukLimit = DEFAULT_PUK_MAX_RETRIES;
+    }
+
+    // the duress PIN is checked first, so one equal to the main PIN would make every unlock a duress unlock. Without
+    // an explicit duress PIN it is the first six digits of the PUK, which must then differ from the PIN too.
+    if (Util.arrayCompare(apduBuffer, OFFSET_CDATA, apduBuffer, altPinOff, PIN_LENGTH) == 0) {
+      ISOException.throwIt(ISO7816.SW_WRONG_DATA);
     }
 
     mainPIN = new OwnerPIN(pinLimit, PIN_LENGTH);
@@ -724,6 +737,18 @@ public class KeycardApplet extends Applet {
   private void changeUserPIN(byte[] apduBuffer, byte len) {
     if (!(len == PIN_LENGTH && allDigits(apduBuffer, ISO7816.OFFSET_CDATA, len))) {
       ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+    }
+
+    // Changing the main PIN to the duress PIN would make every later unlock a duress unlock, so it is refused. Only
+    // the main PIN's holder gets this check: offered to a duress session it would be an oracle for the main PIN (set
+    // a candidate, see whether it is refused), so a duress session may set its own PIN to anything. altPIN.check
+    // counts a failed comparison against the duress PIN, which the main PIN's holder may reset, as VERIFY PIN does.
+    if (pin == mainPIN) {
+      boolean equal = altPIN.check(apduBuffer, ISO7816.OFFSET_CDATA, len);
+      altPIN.resetAndUnblock();
+      if (equal) {
+        ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+      }
     }
 
     pin.update(apduBuffer, ISO7816.OFFSET_CDATA, len);
@@ -931,6 +956,7 @@ public class KeycardApplet extends Applet {
     if (outOffEd > 0) {
       Util.arrayCopy(apduBuffer, outOffEd, ed25519MasterKey, (short) 0, Crypto.KEY_SECRET_SIZE);
       Util.arrayCopy(apduBuffer, (short) (outOffEd + Crypto.KEY_SECRET_SIZE), ed25519MasterChainCode, (short) 0, CHAIN_CODE_SIZE);
+      crypto.sha256.doFinal(ed25519MasterChainCode, (short) 0, CHAIN_CODE_SIZE, ed25519AltChainCode, (short) 0);
       hasEd25519Master = true;
     } else {
       hasEd25519Master = false;
@@ -1102,6 +1128,25 @@ public class KeycardApplet extends Applet {
   /**
    * Clear all keys and erases the key UID.
    */
+  /**
+   * The Ed25519 chain code of the active PIN's tree: the duress PIN derives a separate (decoy) set of Ed25519 keys,
+   * like its BIP32 tree. Chosen from the active PIN at the point of use, so it cannot fall out of step.
+   */
+  private byte[] ed25519ChainCode() {
+    return (pin == altPIN) ? ed25519AltChainCode : ed25519MasterChainCode;
+  }
+
+  /**
+   * Refuses the empty Ed25519 path: only children differ between the main and duress trees, the master key itself is
+   * the same in both, so a duress session could otherwise sign with the real master key. Stellar (SEP-0005) never
+   * uses m itself.
+   */
+  private void checkEd25519Path() {
+    if (tmpPath[0] == 0) {
+      ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+    }
+  }
+
   private void clearKeys() {
     isExtended = false;
     masterPrivate.clearKey();
@@ -1111,6 +1156,7 @@ public class KeycardApplet extends Applet {
     resetCurveParameters();
     Util.arrayFillNonAtomic(ed25519MasterKey, (short) 0, (short) ed25519MasterKey.length, (byte) 0);
     Util.arrayFillNonAtomic(ed25519MasterChainCode, (short) 0, (short) ed25519MasterChainCode.length, (byte) 0);
+    Util.arrayFillNonAtomic(ed25519AltChainCode, (short) 0, (short) ed25519AltChainCode.length, (byte) 0);
     Util.arrayFillNonAtomic(masterChainCode, (short) 0, (short) masterChainCode.length, (byte) 0);
     Util.arrayFillNonAtomic(altChainCode, (short) 0, (short) altChainCode.length, (byte) 0);
     Util.arrayFillNonAtomic(leeMasterChainCode, (short) 0, (short) leeMasterChainCode.length, (byte) 0);
@@ -1180,7 +1226,7 @@ public class KeycardApplet extends Applet {
   }
 
   /**
-   * Wipes the note store (one atomic epoch increment, so a duress wipe takes no visible extra time).
+   * Wipes the note store, both trees (one atomic epoch increment). Used by FACTORY RESET.
    */
   private void wipeNotes() {
     NoteStore ns = notesOrNull();
@@ -1265,8 +1311,9 @@ public class KeycardApplet extends Applet {
       if (!hasEd25519Master) {
         ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
       }
+      checkEd25519Path();
 
-      if (!ed25519.slip10Derive(crypto, ed25519MasterKey, ed25519MasterChainCode, tmpPath, (short) 1, (short) tmpPath[0], apduBuffer, (short) (OFFSET_CDATA + MessageDigest.LENGTH_SHA_256), derivationOutput, (short) 0)) {
+      if (!ed25519.slip10Derive(crypto, ed25519MasterKey, ed25519ChainCode(), tmpPath, (short) 1, (short) tmpPath[0], apduBuffer, (short) (OFFSET_CDATA + MessageDigest.LENGTH_SHA_256), derivationOutput, (short) 0)) {
         ISOException.throwIt(ISO7816.SW_DATA_INVALID);
       }
     } else {
@@ -1406,8 +1453,9 @@ public class KeycardApplet extends Applet {
     }
 
     updateDerivationPath(apduBuffer, (short) 0, dataLen);
+    checkEd25519Path();
 
-    if (!ed25519.slip10Derive(crypto, ed25519MasterKey, ed25519MasterChainCode, tmpPath, (short) 1, (short) tmpPath[0], apduBuffer, (short) (OFFSET_CDATA + dataLen), derivationOutput, (short) 0)) {
+    if (!ed25519.slip10Derive(crypto, ed25519MasterKey, ed25519ChainCode(), tmpPath, (short) 1, (short) tmpPath[0], apduBuffer, (short) (OFFSET_CDATA + dataLen), derivationOutput, (short) 0)) {
       ISOException.throwIt(ISO7816.SW_DATA_INVALID);
     }
 

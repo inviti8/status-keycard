@@ -15,7 +15,8 @@ import javacard.framework.Util;
  * Storage: a pool of 256-byte blocks, chained per note through {@code next}, and a directory of entries
  * {@code [status:1 epoch:2 len:2 first:2 tag:32 meta:M]}. There is no free list: a block is free when no live
  * entry's chain reaches it. An entry is live when its status is not FREE and its epoch is the current one, so a
- * wipe is a single epoch increment. Every state change is one atomic write.
+ * wipe is a single epoch increment. Every state change is one atomic write. The status byte's top bit records the
+ * tree (main or duress PIN) that owns the note; each tree sees only its own.
  *
  * Install parameters (GP C9 data, all optional): {@code blocks:2 entries:1 metaLen:1}.
  */
@@ -41,6 +42,9 @@ public class NoteStoreApplet extends Applet implements NoteStore {
   static final byte STATUS_FREE = 0;
   public static final byte STATUS_WRITING = 1;
   public static final byte STATUS_HELD = 2;
+  // the status byte's top bit marks a note written under the duress PIN (its own, decoy, tree)
+  static final byte STATUS_TREE_DURESS = (byte) 0x80;
+  static final byte STATUS_MASK = 0x7F;
 
   static final short E_STATUS = 0;
   static final short E_EPOCH = 1;
@@ -130,25 +134,35 @@ public class NoteStoreApplet extends Applet implements NoteStore {
 
   // NoteStore
 
-  public short status(byte[] buf, short off, short scratchOff) {
+  public short status(byte tree, byte[] buf, short off, short scratchOff) {
     short free = computeFree(buf, scratchOff);
-    short liveEntries = 0;
+    short own = 0;
+    short other = 0;
+    short otherBlocks = 0;
     for (short e = 0; e < entries; e++) {
-      if (isLive((short) (e * entrySize))) {
-        liveEntries++;
+      short eo = (short) (e * entrySize);
+      if (!isLive(eo)) {
+        continue;
+      }
+      if (ownedBy(eo, tree)) {
+        own++;
+      } else {
+        other++;
+        otherBlocks += blocksFor(Util.getShort(dir, (short) (eo + E_LEN)));
       }
     }
 
+    // the other tree's notes are left out of the totals, so an empty tree reads as an empty store
     buf[off] = STORE_VERSION;
-    Util.setShort(buf, (short) (off + 1), blocks);
+    Util.setShort(buf, (short) (off + 1), (short) (blocks - otherBlocks));
     Util.setShort(buf, (short) (off + 3), free);
-    buf[(short) (off + 5)] = (byte) entries;
-    buf[(short) (off + 6)] = (byte) (entries - liveEntries);
+    buf[(short) (off + 5)] = (byte) (entries - other);
+    buf[(short) (off + 6)] = (byte) (entries - other - own);
     buf[(short) (off + 7)] = metaLen;
     return 8;
   }
 
-  public short list(byte first, byte[] buf, short off, short maxLen) {
+  public short list(byte tree, byte first, byte[] buf, short off, short maxLen) {
     short rec = (short) (4 + TAG_LEN + metaLen);
     short end = (short) (off + maxLen - 1);
     short out = off;
@@ -156,14 +170,14 @@ public class NoteStoreApplet extends Applet implements NoteStore {
 
     for (; e < entries; e++) {
       short eo = (short) (e * entrySize);
-      if (!isLive(eo)) {
+      if (!ownedBy(eo, tree)) {
         continue;
       }
       if ((short) (out + rec) > end) {
         break;
       }
       buf[out] = (byte) e;
-      buf[(short) (out + 1)] = dir[eo];
+      buf[(short) (out + 1)] = (byte) (dir[eo] & STATUS_MASK);
       Util.arrayCopyNonAtomic(dir, (short) (eo + E_LEN), buf, (short) (out + 2), (short) 2);
       Util.arrayCopyNonAtomic(dir, (short) (eo + E_TAG), buf, (short) (out + 4), (short) (TAG_LEN + metaLen));
       out += rec;
@@ -173,7 +187,7 @@ public class NoteStoreApplet extends Applet implements NoteStore {
     return (short) (out - off + 1);
   }
 
-  public byte begin(byte[] buf, short dataOff, short scratchOff) {
+  public byte begin(byte tree, byte[] buf, short dataOff, short scratchOff) {
     short len = Util.getShort(buf, dataOff);
     short tagOff = (short) (dataOff + 2);
 
@@ -184,6 +198,7 @@ public class NoteStoreApplet extends Applet implements NoteStore {
       ISOException.throwIt(ISO7816.SW_UNKNOWN);
     }
 
+    // Tags are unique within a tree only: refusing a tag the other tree holds would reveal that note.
     short slot = -1;
     for (short e = 0; e < entries; e++) {
       short eo = (short) (e * entrySize);
@@ -191,7 +206,7 @@ public class NoteStoreApplet extends Applet implements NoteStore {
         if (slot < 0) {
           slot = e;
         }
-      } else if (Util.arrayCompare(dir, (short) (eo + E_TAG), buf, tagOff, TAG_LEN) == 0) {
+      } else if (ownedBy(eo, tree) && Util.arrayCompare(dir, (short) (eo + E_TAG), buf, tagOff, TAG_LEN) == 0) {
         ISOException.throwIt(SW_TAG_EXISTS);
       }
     }
@@ -220,7 +235,7 @@ public class NoteStoreApplet extends Applet implements NoteStore {
     next[prev] = CHAIN_END;
 
     // Assemble the entry over the (no longer needed) bitmap, then publish it with one atomic copy.
-    buf[scratchOff] = STATUS_WRITING;
+    buf[scratchOff] = (byte) (STATUS_WRITING | treeBit(tree));
     Util.setShort(buf, (short) (scratchOff + E_EPOCH), epoch);
     Util.setShort(buf, (short) (scratchOff + E_LEN), len);
     Util.setShort(buf, (short) (scratchOff + E_FIRST), first);
@@ -230,8 +245,8 @@ public class NoteStoreApplet extends Applet implements NoteStore {
     return (byte) slot;
   }
 
-  public void write(byte entry, short offset, byte[] buf, short off, short len) {
-    short eo = checkEntry(entry, STATUS_WRITING);
+  public void write(byte tree, byte entry, short offset, byte[] buf, short off, short len) {
+    short eo = checkEntry(tree, entry, STATUS_WRITING);
     short noteLen = Util.getShort(dir, (short) (eo + E_LEN));
     if (offset < 0 || len < 0 || (short) (offset + len) > noteLen) {
       ISOException.throwIt(ISO7816.SW_WRONG_DATA);
@@ -239,8 +254,8 @@ public class NoteStoreApplet extends Applet implements NoteStore {
     copyNote(eo, offset, buf, off, len, true);
   }
 
-  public short read(byte entry, boolean held, short offset, byte[] buf, short off, short len) {
-    short eo = checkEntry(entry, held ? STATUS_HELD : STATUS_WRITING);
+  public short read(byte tree, byte entry, boolean held, short offset, byte[] buf, short off, short len) {
+    short eo = checkEntry(tree, entry, held ? STATUS_HELD : STATUS_WRITING);
     short noteLen = Util.getShort(dir, (short) (eo + E_LEN));
     if (offset < 0 || offset > noteLen || len < 0) {
       ISOException.throwIt(ISO7816.SW_WRONG_DATA);
@@ -252,22 +267,22 @@ public class NoteStoreApplet extends Applet implements NoteStore {
     return len;
   }
 
-  public short length(byte entry, boolean held) {
-    return Util.getShort(dir, (short) (checkEntry(entry, held ? STATUS_HELD : STATUS_WRITING) + E_LEN));
+  public short length(byte tree, byte entry, boolean held) {
+    return Util.getShort(dir, (short) (checkEntry(tree, entry, held ? STATUS_HELD : STATUS_WRITING) + E_LEN));
   }
 
-  public void commit(byte entry) {
-    dir[checkEntry(entry, STATUS_WRITING)] = STATUS_HELD;
+  public void commit(byte tree, byte entry) {
+    dir[checkEntry(tree, entry, STATUS_WRITING)] = (byte) (STATUS_HELD | treeBit(tree));
   }
 
-  public void delete(byte entry, boolean abort, byte[] buf, short tagOff) {
-    short eo = checkEntry(entry, abort ? STATUS_WRITING : STATUS_HELD);
+  public void delete(byte tree, byte entry, boolean abort, byte[] buf, short tagOff) {
+    short eo = checkEntry(tree, entry, abort ? STATUS_WRITING : STATUS_HELD);
     checkTag(eo, buf, tagOff);
     dir[eo] = STATUS_FREE;
   }
 
-  public void setMeta(byte entry, byte[] buf, short tagOff) {
-    short eo = checkEntry(entry, STATUS_HELD);
+  public void setMeta(byte tree, byte entry, byte[] buf, short tagOff) {
+    short eo = checkEntry(tree, entry, STATUS_HELD);
     checkTag(eo, buf, tagOff);
     Util.arrayCopy(buf, (short) (tagOff + TAG_LEN), dir, (short) (eo + E_META), metaLen);
   }
@@ -288,20 +303,29 @@ public class NoteStoreApplet extends Applet implements NoteStore {
 
   // internals
 
-  private boolean isLive(short eo) {
-    return dir[eo] != STATUS_FREE && Util.getShort(dir, (short) (eo + E_EPOCH)) == epoch;
+  private static byte treeBit(byte tree) {
+    return tree != 0 ? STATUS_TREE_DURESS : 0;
   }
 
-  private short checkEntry(byte entry, byte status) {
+  private boolean isLive(short eo) {
+    return (dir[eo] & STATUS_MASK) != STATUS_FREE && Util.getShort(dir, (short) (eo + E_EPOCH)) == epoch;
+  }
+
+  private boolean ownedBy(short eo, byte tree) {
+    return isLive(eo) && (byte) (dir[eo] & STATUS_TREE_DURESS) == treeBit(tree);
+  }
+
+  /** Returns the entry's offset if it belongs to the tree and is in the given state; another tree's is not found. */
+  private short checkEntry(byte tree, byte entry, byte status) {
     short e = (short) (entry & 0xFF);
     if (e >= entries) {
       ISOException.throwIt(SW_NOT_FOUND);
     }
     short eo = (short) (e * entrySize);
-    if (!isLive(eo)) {
+    if (!ownedBy(eo, tree)) {
       ISOException.throwIt(SW_NOT_FOUND);
     }
-    if (dir[eo] != status) {
+    if ((dir[eo] & STATUS_MASK) != status) {
       ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
     }
     return eo;

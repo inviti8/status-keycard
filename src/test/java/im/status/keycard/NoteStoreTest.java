@@ -32,7 +32,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * The note store (docs/NOTE_STORE.md) through the Keycard applet's secure channel. Runs on the simulator and on a
  * card (target "card": `./gradlew install` must have put the store and the fork on it).
  *
- * Every test starts from an empty store: verifying the duress PIN wipes it, then the main PIN is verified.
+ * Every test starts from an empty store: both trees (main and duress PIN) are emptied by deleting their entries,
+ * then the main PIN is verified.
  */
 public class NoteStoreTest {
   static final boolean SIMULATOR = "simulator".equals(System.getProperty("im.status.keycard.test.target", "card"));
@@ -70,7 +71,25 @@ public class NoteStoreTest {
   @BeforeEach
   void setup() throws Exception {
     rig = shared;
-    rig.unlockEmpty();
+    empty();
+  }
+
+  /** Empties both trees and leaves the main PIN verified. */
+  void empty() throws Exception {
+    rig.unlock();
+    deleteAll();
+    assertEquals(SW_OK, rig.cmdSet.verifyPIN(DURESS_PIN).getSw());
+    deleteAll();
+    assertEquals(SW_OK, rig.cmdSet.verifyPIN(PIN).getSw());
+  }
+
+  /** Deletes (or aborts) every entry the active PIN can see. */
+  void deleteAll() throws Exception {
+    int metaLen = status().metaLen;
+    for (byte[] row : list(metaLen)) {
+      boolean writing = row[1] == NoteStoreApplet.STATUS_WRITING;
+      assertEquals(SW_OK, delete(row[0] & 0xff, writing, Arrays.copyOfRange(row, 4, 36)).getSw());
+    }
   }
 
   // --- the rig: one card or simulator with the store, Keycard and Ident applets, unlocked over SC V2
@@ -156,14 +175,6 @@ public class NoteStoreTest {
     void unlock() throws Exception {
       cmdSet.select().checkOK();
       cmdSet.autoOpenSecureChannel();
-      assertEquals(SW_OK, cmdSet.verifyPIN(PIN).getSw());
-    }
-
-    /** Wipes through the duress PIN, then unlocks with the main PIN. */
-    void unlockEmpty() throws Exception {
-      cmdSet.select().checkOK();
-      cmdSet.autoOpenSecureChannel();
-      assertEquals(SW_OK, cmdSet.verifyPIN(DURESS_PIN).getSw());
       assertEquals(SW_OK, cmdSet.verifyPIN(PIN).getSw());
     }
 
@@ -446,21 +457,38 @@ public class NoteStoreTest {
   }
 
   @Test
-  @DisplayName("the duress PIN wipes every note at once")
-  void duressWipe() throws Exception {
+  @DisplayName("the duress PIN sees its own empty store; the main PIN's notes are hidden, not wiped")
+  void duressHides() throws Exception {
+    byte[][] notes = new byte[3][];
+    byte[][] tags = new byte[3][];
+    int[] entries = new int[3];
     for (int i = 0; i < 3; i++) {
-      store(bytes(noteSize(3)), tag(), new byte[16]);
+      notes[i] = bytes(noteSize(3));
+      tags[i] = tag();
+      entries[i] = store(notes[i], tags[i], new byte[16]);
     }
-    assertEquals(3, list(16).size());
+    Status mainStatus = status();
 
     assertEquals(SW_OK, rig.cmdSet.verifyPIN(DURESS_PIN).getSw());
     Status s = status();
-    assertEquals(s.blocksTotal, s.blocksFree);
+    assertEquals(s.blocksTotal, s.blocksFree, "an empty tree reads as an empty store");
     assertEquals(s.entriesTotal, s.entriesFree);
+    assertEquals(mainStatus.blocksTotal - 3 * 7, s.blocksTotal);
     assertEquals(0, list(16).size());
+    // the main notes are unreachable by index, and their tags are not compared (no existence oracle)
+    assertEquals(SW_NOT_FOUND, rig.send(KeycardApplet.INS_NOTE_READ, entries[0], 0, concat(u16(0), new byte[] {16})).getSw());
+    assertEquals(SW_NOT_FOUND, delete(entries[0], false, tags[0]).getSw());
+    byte[] decoy = bytes(noteSize(2));
+    int decoyEntry = store(decoy, tags[0], new byte[16]);
+    assertEquals(1, list(16).size());
 
     assertEquals(SW_OK, rig.cmdSet.verifyPIN(PIN).getSw());
-    assertEquals(0, list(16).size());
+    java.util.List<byte[]> rows = list(16);
+    assertEquals(3, rows.size(), "the decoy note is not visible to the main PIN");
+    for (int i = 0; i < 3; i++) {
+      assertArrayEquals(notes[i], readAll(entries[i], notes[i].length));
+    }
+    assertEquals(SW_NOT_FOUND, rig.send(KeycardApplet.INS_NOTE_READ, decoyEntry, 0, concat(u16(0), new byte[] {16})).getSw());
   }
 
   @Test
@@ -469,7 +497,7 @@ public class NoteStoreTest {
     Status empty = status();
     StringBuilder report = new StringBuilder("[notes] capacity, " + empty.blocksTotal + " blocks / " + empty.entriesTotal + " entries:");
     for (int pairs : new int[] {2, 3, 4, 10, 24}) {
-      rig.unlockEmpty();
+      empty();
       byte[] note = bytes(noteSize(pairs));
       int stored = 0;
       while (true) {
@@ -491,19 +519,62 @@ public class NoteStoreTest {
     System.out.println(report);
   }
 
+  @Test
+  @DisplayName("knowing the duress PIN does not give unlimited guesses at the main PIN")
+  void duressPinDoesNotResetMainPinTries() throws Exception {
+    assumeTrue(SIMULATOR);
+    rig = Rig.simulator(null, true);
+    rig.cmdSet.select().checkOK();
+    rig.cmdSet.autoOpenSecureChannel();
+    // two wrong guesses, then the duress PIN, repeated: the wrong guesses must keep counting against the main PIN
+    for (int i = 0; i < 4; i++) {
+      assertEquals(0x6300, rig.cmdSet.verifyPIN("111111").getSw() & 0xFF00);
+      assertEquals(0x6300, rig.cmdSet.verifyPIN("222222").getSw() & 0xFF00);
+      assertEquals(SW_OK, rig.cmdSet.verifyPIN(DURESS_PIN).getSw());
+    }
+    assertEquals(0x6300, rig.cmdSet.verifyPIN(PIN).getSw() & 0xFF00, "the main PIN must be blocked after 8 wrong guesses");
+  }
+
   // --- simulator-only: these need a fresh card
 
   @Test
-  @DisplayName("without a separate duress PIN, an ordinary unlock does not wipe")
-  void noDuressPinNoWipe() throws Exception {
+  @DisplayName("INIT refuses a duress PIN equal to the main PIN, explicit or defaulted from the PUK")
+  void initRefusesDuressEqualToMain() throws Exception {
     assumeTrue(SIMULATOR);
-    rig = Rig.simulator(null, false); // INIT without an alt PIN: alt = main, every unlock is case 3
+    Rig r = new Rig();
+    r.simulator = new CardSimulator();
+    r.install(NOTES_APPLET_AID, NoteStoreApplet.class, NOTES_INSTANCE_AID, null);
+    r.installKeycard();
+    r.install(Identifiers.IDENT_AID, IdentApplet.class, Identifiers.IDENT_INSTANCE_AID, new byte[] {0x01, 0x00, 0x02, (byte) 0xC9, 0x00});
+    r.duressPin = true;
+    PCSCCardChannel channel = new PCSCCardChannel(CardTerminalSimulator.terminal(r.simulator).connect("*").getBasicChannel());
+    r.ca = Rig.caKeyPair();
+    new IdentCommandSet(channel).select().checkOK();
+    new IdentCommandSet(channel).storeData(TestIdentity.certStoreData(r.ca)).checkSW(0x9000, 0x6985);
+    r.cmdSet = new TestKeycardCommandSet(channel, ((org.bouncycastle.jce.interfaces.ECPublicKey) r.ca.getPublic()).getQ().getEncoded(true));
+    r.cmdSet.select().checkOK();
+
+    assertEquals(SW_WRONG_DATA, r.cmdSet.init(PIN, PIN, PUK, new byte[0], (byte) 3, (byte) 5).getSw());
+    assertEquals(SW_WRONG_DATA, r.cmdSet.init("012345", PUK, new byte[0]).getSw()); // PUK starts with the PIN
+    assertEquals(SW_OK, r.cmdSet.init(PIN, PUK, new byte[0]).getSw());           // duress PIN = "012345"
+  }
+
+  @Test
+  @DisplayName("the main PIN cannot be changed to the duress PIN; a duress session may set its own PIN freely")
+  void changePinRules() throws Exception {
+    assumeTrue(SIMULATOR);
+    rig = Rig.simulator(null, true);
     rig.unlock();
-    byte[] note = bytes(noteSize(2));
-    int entry = store(note, tag(), new byte[16]);
-    rig.unlock();
-    rig.unlock();
-    assertArrayEquals(note, readAll(entry, note.length));
+    assertEquals(SW_WRONG_DATA, rig.cmdSet.changePIN(KeycardApplet.CHANGE_PIN_P1_USER_PIN, DURESS_PIN).getSw());
+    // the refused comparison did not use up the duress PIN's tries
+    for (int i = 0; i < 5; i++) {
+      assertEquals(SW_WRONG_DATA, rig.cmdSet.changePIN(KeycardApplet.CHANGE_PIN_P1_USER_PIN, DURESS_PIN).getSw());
+    }
+    assertEquals(SW_OK, rig.cmdSet.verifyPIN(DURESS_PIN).getSw());
+
+    // in a duress session no comparison is made, so CHANGE PIN cannot be used to test guesses at the main PIN
+    assertEquals(SW_OK, rig.cmdSet.changePIN(KeycardApplet.CHANGE_PIN_P1_USER_PIN, "135790").getSw());
+    assertEquals(SW_OK, rig.cmdSet.changePIN(KeycardApplet.CHANGE_PIN_P1_USER_PIN, PIN).getSw());
   }
 
   @Test
@@ -512,7 +583,7 @@ public class NoteStoreTest {
     assumeTrue(SIMULATOR);
     // [privLen priv][paramLen C9 len blocks:2 entries:1 metaLen:1]
     rig = Rig.simulator(new byte[] {0x01, 0x00, 0x06, (byte) 0xC9, 0x04, 0x00, 0x14, 0x03, 0x18}, true);
-    rig.unlockEmpty();
+    empty();
     Status s = status();
     assertEquals(20, s.blocksTotal);
     assertEquals(3, s.entriesTotal);
@@ -533,7 +604,7 @@ public class NoteStoreTest {
   void survivesKeycardReinstall() throws Exception {
     assumeTrue(SIMULATOR);
     rig = Rig.simulator(null, true);
-    rig.unlockEmpty();
+    empty();
     byte[] note = bytes(noteSize(3));
     byte[] tag = tag();
     int entry = store(note, tag, new byte[16]);
@@ -552,7 +623,7 @@ public class NoteStoreTest {
   void factoryResetWipes() throws Exception {
     assumeTrue(SIMULATOR);
     rig = Rig.simulator(null, true);
-    rig.unlockEmpty();
+    empty();
     byte[] note = bytes(noteSize(2));
     int entry = store(note, tag(), new byte[16]);
 
