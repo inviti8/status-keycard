@@ -162,3 +162,22 @@ INIT and CHANGE PIN equality, and factory reset.
 **Memory** (probe INS `03`): 12,924 B persistent, 86 B CLEAR_ON_RESET and 2,592 B CLEAR_ON_DESELECT
 free. That is 624 B and 2 B less than before, the cost of the added code and the Ed25519 decoy chain
 code.
+
+## Owner-index counter and LOAD KEY fix on the card (2026-10-22, 25ff96d)
+
+The store package was reinstalled again, because the counter changed its interface, and then the
+fork. On the card:
+
+| Suite | Result | Notes |
+|---|---|---|
+| KeycardTest | 27/27 | Includes `ed25519ShortSeedTest` (16- and 32-byte seeds, SLIP-0010 vector), and the plain-keypair LOAD KEY tests on the bounded parser |
+| StellarM4Test | 1/1 | |
+| NoteStoreTest | 13/13 on the card | Includes `ownerIndexCounter`: one index each, reclaims do not hand indexes back, ADVANCE never lowers the counter |
+
+Simulator-only and passed there: the counter's lifecycle (starts at 1, separate per PIN, survives
+FACTORY RESET, stops at `0x7FFFFFFF`), and the 1,500-load `LoadKeyPairTest`. The bug fails about 1 load
+in 256, so the card's few keypair loads cannot by themselves show the fix works. The simulator stress
+test is the evidence.
+
+Capacity is unchanged (43 / 31 / 27 / 14 / 7 at 2 / 3 / 4 / 10 / 24 pairs). Free memory: **12,504 B**
+persistent, 86 B CLEAR_ON_RESET and 2,592 B CLEAR_ON_DESELECT. The new code takes 420 B.

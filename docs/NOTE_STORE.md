@@ -163,7 +163,7 @@ atomic.
 - **FACTORY RESET wipes the store** (both trees) with one epoch increment, and it inherits our PIN gate
   on wipe.
 
-### D7. Owner-index counter *(decided 2026-10-22)*
+### D7. Owner-index counter *(decided 2026-10-22; verified on the J3R200)*
 
 Kenter never reuses an owner index (`OWNER_KEYS.md` §4): reuse points two payers at one
 commitment and links their payments. A terminal with no state of its own, the Shell, cannot pick
