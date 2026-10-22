@@ -138,3 +138,27 @@ typical 3–4 pair receive takes roughly 3.5–4.5 s, and the `roundTrip` test (
 read it back, LIST and STATUS) took 7.8 s. That is slower than the ~1 s estimate in
 `SHELL_KENTER.md` §6.3. Where the time goes (NFC framing, AES-CCM, NVM writes) has not been
 measured, nor has a contact reader.
+
+## Duress PIN changes on the card (2026-10-22, 23500b6)
+
+The store package was reinstalled because its interface changed (`-Pim.status.keycard.notes.reinstall=true`),
+then the fork was reinstalled. The full suite then ran on the card:
+
+| Suite | Result | Notes |
+|---|---|---|
+| KeycardTest | 26/26 | Includes `ed25519DuressTreeTest`: the duress PIN derives decoy Ed25519 keys, and the main PIN still reproduces SEP-0005 |
+| StellarM4Test | 1/1 | |
+| NoteStoreTest | 12/12 on the card | Includes `duressHides` and `duressShare`. The 6 tests that need a fresh card are simulator-only and passed there |
+
+The PIN rules introduced in the same change are simulator-only tests: duress-assisted brute force,
+INIT and CHANGE PIN equality, and factory reset.
+
+**Capacity on the card**, main tree at 217 blocks / 56 entries, matches the simulator exactly:
+
+| Pairs | 2 | 3 | 4 | 10 | 24 |
+|---|---|---|---|---|---|
+| Notes | 43 | 31 | 27 | 14 | 7 |
+
+**Memory** (probe INS `03`): 12,924 B persistent, 86 B CLEAR_ON_RESET and 2,592 B CLEAR_ON_DESELECT
+free. That is 624 B and 2 B less than before, the cost of the added code and the Ed25519 decoy chain
+code.

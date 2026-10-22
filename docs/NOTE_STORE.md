@@ -3,8 +3,9 @@
 **Status:** built, 2026-10-22: `notes/src` and `NoteStoreTest`.
 - **First version verified on a J3R200:** 11/11 on the card. Capacity matched, the store took
   71.3 KB at the default sizes, and a typical receive took about 4 s over NFC (`ONMETAL_REPORT.md`).
-- **Duress change, simulator only so far:** the duress PIN now hides the notes behind a fixed share
-  instead of wiping them (D5). 18/18 in the simulator; not yet run on the card.
+- **Duress change verified on the J3R200:** the duress PIN now hides the notes behind a fixed share
+  instead of wiping them (D5). 12/12 on the card and 18/18 in the simulator. On-card capacity matches
+  the simulator.
 
 Decided: D1 (separate package), duress = hide with a fixed share (D5), the tag is the ephemeral key,
 and the meta layout (§9).
@@ -315,7 +316,7 @@ share: 217 blocks / 56 entries), measured in the simulator by filling the store:
 | 10 | 3,592 B | 14 | 16 |
 | 24 | 7,652 B | 7 | 8 |
 
-The "without" column was measured on the card, and it matched the simulator exactly. The realistic
+Both columns were measured on the card, and both matched the simulator exactly. The realistic
 mix is 3–4 pairs: the UI default is 3, a node network uses nodes + 2, and the deployed testnet
 maximum is 10. That means roughly **27–31 notes per J3R200**. Entries run out only for notes under
 about 1 KB, so the entry count is not the constraint.
