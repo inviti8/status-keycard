@@ -32,7 +32,7 @@ Package AID `F04B4350524F4245`, applet AID `F04B4350524F424501`.
 ## Run (GlobalPlatformPro)
 
     gp --install probe.cap
-    gp -d --apdu 00A4040009F04B4350524F424501 --apdu 0002000000
+    gp -d --apdu 00A4040009F04B4350524F424501 --apdu 0003000000 --apdu 0002000000
     gp --uninstall probe.cap
 
 `00 02 00 00 00` runs every probe and returns eleven 7-byte rows. Each probe can also be run on
@@ -40,7 +40,8 @@ its own to get its full output:
 
 | APDU             | Probe                                                               |
 |------------------|---------------------------------------------------------------------|
-| `00 01 00 00 00` | info: `JCSystem.getVersion()` (2 bytes) + probe version (`02`)      |
+| `00 01 00 00 00` | info: `JCSystem.getVersion()` (2 bytes) + probe version (`03`)      |
+| `00 03 00 00 00` | free memory, 3 × 4-byte ints: persistent, transient reset, transient deselect. Send it before `00 02`, which allocates |
 | `00 10 00 00 00` | 256-bit RSA NOPAD, modulus 2^255-19, exponent p-2                   |
 | `00 11 00 00 00` | control: 512-bit RSA NOPAD                                          |
 | `00 12 00 00 00` | fallback: 512-bit RSA **private** key, modulus p zero-padded to 64 bytes |

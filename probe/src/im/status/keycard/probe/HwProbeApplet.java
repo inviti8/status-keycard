@@ -35,6 +35,9 @@ import javacardx.crypto.Cipher;
  *             SCALAR*G + G. Needed for a cheap on-card verify-after-sign. P1 selects the key:
  *             0x00 = transient, cofactor never set (JCMathLib's config), 0x01 = transient, cofactor 8
  *   INS 0x01  Info: JCSystem.getVersion() and the probe version.
+ *   INS 0x03  Free memory, as three 4-byte big-endian ints (JCSystem.getAvailableMemory, the
+ *             JC 3.0.4 overload that is not capped at 32767): persistent, transient reset,
+ *             transient deselect. Read it before INS 0x02, which allocates and caches objects.
  *   INS 0x02  Runs every probe above and returns a 7-byte summary row per probe.
  *
  * Nothing is allocated at install time, so the applet installs even when a key size is refused.
@@ -55,6 +58,7 @@ import javacardx.crypto.Cipher;
 public class HwProbeApplet extends Applet {
   static final byte INS_INFO = (byte) 0x01;
   static final byte INS_RUN_ALL = (byte) 0x02;
+  static final byte INS_MEMORY = (byte) 0x03;
   static final byte INS_RSA_256 = (byte) 0x10;
   static final byte INS_RSA_512 = (byte) 0x11;
   static final byte INS_RSA_512_INV = (byte) 0x12;
@@ -87,7 +91,7 @@ public class HwProbeApplet extends Applet {
   static final byte EXC_SYSTEM = 0x02;
   static final byte EXC_OTHER = 0x03;
 
-  static final byte PROBE_VERSION = 0x02;
+  static final byte PROBE_VERSION = 0x03;
   static final short HEADER_LEN = 6;
   static final short SUMMARY_ROW_LEN = 7;
 
@@ -246,6 +250,7 @@ public class HwProbeApplet extends Applet {
   private ECPrivateKey weiPersistent;
   private ECPrivateKey k1Key;
   private byte[] work;
+  private short[] mem;
 
   private byte stage;
 
@@ -256,6 +261,19 @@ public class HwProbeApplet extends Applet {
     } else {
       applet.register();
     }
+  }
+
+  private short availableMemory(byte[] buf) {
+    if (mem == null) {
+      mem = JCSystem.makeTransientShortArray((short) 6, JCSystem.CLEAR_ON_DESELECT);
+    }
+    JCSystem.getAvailableMemory(mem, (short) 0, JCSystem.MEMORY_TYPE_PERSISTENT);
+    JCSystem.getAvailableMemory(mem, (short) 2, JCSystem.MEMORY_TYPE_TRANSIENT_RESET);
+    JCSystem.getAvailableMemory(mem, (short) 4, JCSystem.MEMORY_TYPE_TRANSIENT_DESELECT);
+    for (short i = 0; i < 6; i++) {
+      Util.setShort(buf, (short) (i * 2), mem[i]);
+    }
+    return 12;
   }
 
   public void process(APDU apdu) throws ISOException {
@@ -275,6 +293,9 @@ public class HwProbeApplet extends Applet {
         break;
       case INS_RUN_ALL:
         len = runAll(buf);
+        break;
+      case INS_MEMORY:
+        len = availableMemory(buf);
         break;
       case INS_RSA_256:
       case INS_RSA_512:

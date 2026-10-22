@@ -76,6 +76,19 @@ public class HwProbeTest {
   }
 
   @Test
+  @DisplayName("MEMORY reports three 4-byte free-memory counts")
+  void memory() {
+    ResponseAPDU resp = sim.transmitCommand(new CommandAPDU(0x00, HwProbeApplet.INS_MEMORY, 0, 0, 256));
+    assertEquals(0x9000, resp.getSW());
+    byte[] d = resp.getData();
+    assertEquals(12, d.length);
+    for (int i = 0; i < 12; i += 4) {
+      // jcardsim reports a fixed 32767 for every memory type
+      assertEquals(32767, ((d[i] & 0xff) << 24) | ((d[i + 1] & 0xff) << 16) | ((d[i + 2] & 0xff) << 8) | (d[i + 3] & 0xff));
+    }
+  }
+
+  @Test
   @DisplayName("256-bit RSA NOPAD computes 2^(p-2) mod p = 2^-1 mod p")
   void rsa256() {
     BigInteger p = new BigInteger(1, HwProbeApplet.WEI_P);
