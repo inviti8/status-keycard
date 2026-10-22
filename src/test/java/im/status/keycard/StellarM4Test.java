@@ -8,6 +8,7 @@ import im.status.keycard.applet.Identifiers;
 import im.status.keycard.applet.IdentCommandSet;
 import im.status.keycard.applet.KeycardCommandSet;
 import im.status.keycard.desktop.PCSCCardChannel;
+import apdu4j.pcsc.TerminalManager;
 import im.status.keycard.io.APDUResponse;
 import org.bitcoinj.crypto.MnemonicCode;
 import org.bouncycastle.jce.ECNamedCurveTable;
@@ -38,6 +39,7 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
  * M4: end-to-end proof that the card signs a real Stellar transaction.
@@ -69,15 +71,27 @@ public class StellarM4Test {
       java.security.Security.addProvider(new org.bouncycastle.jce.provider.BouncyCastleProvider());
     }
 
-    simulator = new CardSimulator();
-
     java.security.KeyPair caKeyPair = buildCaKeyPair();
 
-    installApplet(Identifiers.KEYCARD_AID, KeycardApplet.class, Identifiers.getKeycardInstanceAID(), null);
-    installApplet(Identifiers.CASH_AID, CashApplet.class, Identifiers.CASH_INSTANCE_AID, new byte[] {0x01, 0x00, 0x02, (byte) 0xC9, 0x00});
-    installApplet(Identifiers.IDENT_AID, IdentApplet.class, Identifiers.IDENT_INSTANCE_AID, new byte[] {0x01, 0x00, 0x02, (byte) 0xC9, 0x00});
-
-    CardTerminal terminal = CardTerminalSimulator.terminal(simulator);
+    // Same target switch as KeycardTest: "card" (the default) uses the first PC/SC reader with a
+    // card present, where `./gradlew install` has already put the applets.
+    CardTerminal terminal;
+    if ("simulator".equals(System.getProperty("im.status.keycard.test.target", "card"))) {
+      simulator = new CardSimulator();
+      installApplet(Identifiers.KEYCARD_AID, KeycardApplet.class, Identifiers.getKeycardInstanceAID(), null);
+      installApplet(Identifiers.CASH_AID, CashApplet.class, Identifiers.CASH_INSTANCE_AID, new byte[] {0x01, 0x00, 0x02, (byte) 0xC9, 0x00});
+      installApplet(Identifiers.IDENT_AID, IdentApplet.class, Identifiers.IDENT_INSTANCE_AID, new byte[] {0x01, 0x00, 0x02, (byte) 0xC9, 0x00});
+      terminal = CardTerminalSimulator.terminal(simulator);
+    } else {
+      terminal = null;
+      for (CardTerminal t : TerminalManager.getTerminalFactory().terminals().list()) {
+        if (t.isCardPresent()) {
+          terminal = t;
+          break;
+        }
+      }
+      assertNotNull(terminal, "no PC/SC reader with a card present");
+    }
     Card card = terminal.connect("*");
     CardChannel channel = card.getBasicChannel();
     PCSCCardChannel sdkChannel = new PCSCCardChannel(channel);
@@ -91,7 +105,7 @@ public class StellarM4Test {
     cmdSet = new KeycardCommandSet(sdkChannel, caCompressed);
     cmdSet.select().checkOK();
 
-    // A fresh jcardsim-installed applet is uninitialized; INIT sets PIN/PUK/pairing.
+    // A freshly installed applet is uninitialized; INIT sets PIN/PUK.
     if (!cmdSet.getApplicationInfo().isInitializedCard()) {
       cmdSet.init("000000", "024680", "012345678901", new byte[0], (byte) 3, (byte) 5).checkOK();
       cmdSet.select().checkOK();

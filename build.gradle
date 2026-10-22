@@ -143,11 +143,10 @@ task probeCap (type: JavaExec) {
 }
 
 afterEvaluate {
-  def jvmArgs = ["-Dim.status.keycard.test.target=${testTarget}"]
-
-  if (testTarget == 'simulator') {
-    jvmArgs.push('-noverify')
-  }
+  // -noverify on every target: the test classpath always holds jcardsim's rewritten API classes
+  // (the probe and Ed25519 primitive tests run in the simulator regardless), and without it JUnit
+  // fails discovery with a VerifyError and the card run silently executes zero tests.
+  def jvmArgs = ["-Dim.status.keycard.test.target=${testTarget}", '-noverify']
 
   def testTask = tasks.getByName('test')
   testTask.jvmArgs(jvmArgs)
