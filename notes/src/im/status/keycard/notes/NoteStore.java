@@ -66,7 +66,21 @@ public interface NoteStore extends Shareable {
   /** Replaces a HELD entry's meta with the M bytes after the 32-byte tag at tagOff, which must match. */
   void setMeta(byte tree, byte entry, byte[] buf, short tagOff);
 
-  /** Makes every entry of both trees dead at once (factory reset). One atomic write. */
+  /**
+   * Hands out the tree's next owner index, as 4 bytes big-endian at off. The counter's advance is persisted before
+   * this returns, so a response lost to a tear only skips an index; one is never handed out twice. Counters start at
+   * 1 (0 is a reusable receive tag), are separate per tree, and survive wipe(). 6A84 once 0x7FFFFFFF has been issued.
+   * Uses 8 bytes of buf from off.
+   */
+  void nextIndex(byte tree, byte[] buf, short off);
+
+  /**
+   * Raises the tree's counter to at least the 4-byte big-endian value at off (at most 0x80000000) and never lowers
+   * it; writes the resulting counter, the index nextIndex would hand out, back at off. A value of 0 reads it.
+   */
+  void advanceIndex(byte tree, byte[] buf, short off);
+
+  /** Makes every entry of both trees dead at once (factory reset). One atomic write. Owner-index counters stay. */
   void wipe();
 
   /** The meta length M fixed at install. */

@@ -163,6 +163,28 @@ atomic.
 - **FACTORY RESET wipes the store** (both trees) with one epoch increment, and it inherits our PIN gate
   on wipe.
 
+### D7. Owner-index counter *(decided 2026-10-22)*
+
+Kenter never reuses an owner index (`OWNER_KEYS.md` §4): reuse points two payers at one
+commitment and links their payments. A terminal with no state of its own, the Shell, cannot pick
+the next index from the notes on the card. "1 + the highest owner index held" hands out a used
+index again as soon as the highest-index note is reclaimed, or after a receive that was shown but
+never stored. So the store keeps the counter:
+
+- **NEXT INDEX** returns the next index and advances the counter. The advance is persisted, with
+  one atomic write, **before** the response, so a response lost to a tear only skips an index;
+  one is never handed out twice. Gaps cost nothing; duplicates cost privacy.
+- **ADVANCE INDEX** raises the counter to at least a value and never lowers it. A desktop that
+  issued indexes itself (`next_owner_index` in its state) syncs the card with it. A value of 0 just
+  reads the counter.
+- **One counter per tree,** so the duress PIN's indexes say nothing about the main tree.
+- **It starts at 1** (0 is Kenter's reusable receive tag) and stops after `0x7FFFFFFF`, the largest
+  index a hardened path component carries (`6A84` after that).
+- **It is never reset:** not by FACTORY RESET, and not by the duress PIN. A card restored from the
+  same phrase would otherwise restart at 1 and reuse old indexes. Only reinstalling the store
+  package resets it, the same event that loses the notes, so after one the host must ADVANCE it
+  past every index it knows.
+
 ### D6. Allocation and sizing
 
 The pool is allocated in the store applet's install, sized by install parameters
@@ -195,6 +217,8 @@ On a J3R452 the same CAP takes larger install parameters. Nothing else changes.
 | `B5` | READ | entry | — | `offset:2 length:1` (≤240) | data |
 | `B6` | DELETE | entry | `00` = HELD, `01` = abort WRITING | `tag:32` (must match: guards against deleting the wrong entry) | — |
 | `B7` | SET META | entry | — | `tag:32 meta:M` | — |
+| `B8` | NEXT INDEX | — | — | — | `index:4`: the owner index handed out (D7) |
+| `B9` | ADVANCE INDEX | — | — | `value:4` (≤ `0x80000000`) | `next:4`: the counter after raising it to at least `value`; `0` reads it |
 
 Status words:
 

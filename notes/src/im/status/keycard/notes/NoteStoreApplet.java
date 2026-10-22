@@ -71,6 +71,8 @@ public class NoteStoreApplet extends Applet implements NoteStore {
   private final byte[] dir;
   private final short[] next;
   private final Object[] pool;
+  // Owner-index counters, 4 bytes big-endian each: main tree at 0, duress tree at 4. The next index to hand out.
+  private final byte[] counters;
   private short epoch;
 
   public static void install(byte[] bArray, short bOffset, byte bLength) {
@@ -110,6 +112,9 @@ public class NoteStoreApplet extends Applet implements NoteStore {
     entrySize = (short) (E_META + m);
     dir = new byte[(short) (e * entrySize)];
     next = new short[b];
+    counters = new byte[8];
+    counters[3] = 1;
+    counters[7] = 1;
 
     short arrays = (short) ((short) (b + BLOCKS_PER_ARRAY - 1) >> ARRAY_SHIFT);
     pool = new Object[arrays];
@@ -282,6 +287,49 @@ public class NoteStoreApplet extends Applet implements NoteStore {
     short eo = checkEntry(tree, entry, STATUS_HELD);
     checkTag(eo, buf, tagOff);
     Util.arrayCopy(buf, (short) (tagOff + TAG_LEN), dir, (short) (eo + E_META), metaLen);
+  }
+
+  public void nextIndex(byte tree, byte[] buf, short off) {
+    short co = tree != 0 ? (short) 4 : (short) 0;
+    // exhausted once the counter has passed 0x7FFFFFFF, the largest index a hardened path component can carry
+    if (counters[co] < 0) {
+      ISOException.throwIt(ISO7816.SW_FILE_FULL);
+    }
+
+    // buf[off..off+4) = the index handed out, buf[off+4..off+8) = the next one, persisted in one atomic copy
+    Util.arrayCopyNonAtomic(counters, co, buf, off, (short) 4);
+    Util.arrayCopyNonAtomic(counters, co, buf, (short) (off + 4), (short) 4);
+    for (short i = (short) (off + 7); i >= (short) (off + 4); i--) {
+      buf[i]++;
+      if (buf[i] != 0) {
+        break;
+      }
+    }
+    Util.arrayCopy(buf, (short) (off + 4), counters, co, (short) 4);
+  }
+
+  public void advanceIndex(byte tree, byte[] buf, short off) {
+    short co = tree != 0 ? (short) 4 : (short) 0;
+    // at most 0x80000000: the value after the last index
+    if (buf[off] < 0 && (buf[(short) (off + 1)] != 0 || buf[(short) (off + 2)] != 0 || buf[(short) (off + 3)] != 0 || buf[off] != (byte) 0x80)) {
+      ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+    }
+    if (compareUnsigned(buf, off, counters, co) > 0) {
+      Util.arrayCopy(buf, off, counters, co, (short) 4);
+    }
+    Util.arrayCopyNonAtomic(counters, co, buf, off, (short) 4);
+  }
+
+  /** Compares two 4-byte big-endian unsigned values: negative, zero or positive. */
+  private static short compareUnsigned(byte[] a, short aOff, byte[] b, short bOff) {
+    for (short i = 0; i < 4; i++) {
+      short x = (short) (a[(short) (aOff + i)] & 0xFF);
+      short y = (short) (b[(short) (bOff + i)] & 0xFF);
+      if (x != y) {
+        return (short) (x - y);
+      }
+    }
+    return 0;
   }
 
   public void wipe() {

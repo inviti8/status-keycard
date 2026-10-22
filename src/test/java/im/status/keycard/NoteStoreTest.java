@@ -26,6 +26,7 @@ import java.util.Arrays;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
@@ -528,6 +529,86 @@ public class NoteStoreTest {
     assertEquals(mainEmpty.blocksTotal, m.blocksTotal);
     assertEquals(mainEmpty.blocksFree, m.blocksFree);
     assertEquals(mainEmpty.entriesFree, m.entriesFree);
+  }
+
+  long nextIndex() throws Exception {
+    APDUResponse r = rig.send(KeycardApplet.INS_NOTE_NEXT_INDEX, 0, 0, new byte[0]);
+    assertEquals(SW_OK, r.getSw());
+    return u32(r.getData());
+  }
+
+  long advanceIndex(long value) throws Exception {
+    APDUResponse r = rig.send(KeycardApplet.INS_NOTE_ADVANCE_INDEX, 0, 0, be32(value));
+    assertEquals(SW_OK, r.getSw());
+    return u32(r.getData());
+  }
+
+  static long u32(byte[] d) {
+    assertEquals(4, d.length);
+    return ((d[0] & 0xffL) << 24) | ((d[1] & 0xffL) << 16) | ((d[2] & 0xffL) << 8) | (d[3] & 0xffL);
+  }
+
+  static byte[] be32(long v) {
+    return new byte[] {(byte) (v >> 24), (byte) (v >> 16), (byte) (v >> 8), (byte) v};
+  }
+
+  @Test
+  @DisplayName("owner indexes are handed out once each, and the counter only moves forward")
+  void ownerIndexCounter() throws Exception {
+    long a = nextIndex();
+    long b = nextIndex();
+    assertEquals(a + 1, b);
+    assertTrue(a >= 1, "0 is the reusable receive tag, never handed out");
+
+    // reclaiming notes does not hand an index back (the 1 + max(owner_index) scheme would)
+    int entry = store(bytes(noteSize(2)), tag(), new byte[16]);
+    assertEquals(SW_OK, delete(entry, false, tagOf(entry)).getSw());
+    assertEquals(b + 1, nextIndex());
+
+    // advance: reading (0), raising, and never lowering
+    assertEquals(b + 2, advanceIndex(0));
+    assertEquals(b + 12, advanceIndex(b + 12));
+    assertEquals(b + 12, advanceIndex(b + 5));
+    assertEquals(b + 12, nextIndex());
+    assertEquals(SW_WRONG_DATA, rig.send(KeycardApplet.INS_NOTE_ADVANCE_INDEX, 0, 0, be32(0x80000001L)).getSw());
+    assertEquals(SW_WRONG_DATA, rig.send(KeycardApplet.INS_NOTE_NEXT_INDEX, 0, 0, new byte[1]).getSw());
+  }
+
+  byte[] tagOf(int entry) throws Exception {
+    for (byte[] row : list(16)) {
+      if ((row[0] & 0xff) == entry) {
+        return Arrays.copyOfRange(row, 4, 36);
+      }
+    }
+    throw new AssertionError("entry " + entry + " not listed");
+  }
+
+  @Test
+  @DisplayName("counters start at 1, are separate per PIN, survive FACTORY RESET and stop at 0x7FFFFFFF")
+  void ownerIndexCounterLifecycle() throws Exception {
+    assumeTrue(SIMULATOR);
+    rig = Rig.simulator(null, true);
+    rig.unlock();
+    assertEquals(1, nextIndex());
+    assertEquals(2, nextIndex());
+
+    // the duress PIN has its own counter: its indexes say nothing about the main tree's
+    assertEquals(SW_OK, rig.cmdSet.verifyPIN(DURESS_PIN).getSw());
+    assertEquals(1, nextIndex());
+    assertEquals(SW_OK, rig.cmdSet.verifyPIN(PIN).getSw());
+    assertEquals(3, nextIndex());
+
+    // a card restored from the same phrase must not restart at 1 and reuse old indexes
+    assertEquals(SW_OK, rig.cmdSet.factoryReset().getSw());
+    rig.initIfNeeded();
+    rig.unlock();
+    assertEquals(4, nextIndex());
+
+    // exhaustion
+    assertEquals(0x7FFFFFFFL, advanceIndex(0x7FFFFFFFL));
+    assertEquals(0x7FFFFFFFL, nextIndex());
+    assertEquals(SW_FULL, rig.send(KeycardApplet.INS_NOTE_NEXT_INDEX, 0, 0, new byte[0]).getSw());
+    assertEquals(0x80000000L, advanceIndex(0x80000000L));
   }
 
   @Test

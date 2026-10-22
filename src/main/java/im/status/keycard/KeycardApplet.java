@@ -43,6 +43,8 @@ public class KeycardApplet extends Applet {
   static final byte INS_NOTE_READ = (byte) 0xB5;
   static final byte INS_NOTE_DELETE = (byte) 0xB6;
   static final byte INS_NOTE_SET_META = (byte) 0xB7;
+  static final byte INS_NOTE_NEXT_INDEX = (byte) 0xB8;
+  static final byte INS_NOTE_ADVANCE_INDEX = (byte) 0xB9;
 
   static final byte NOTE_DELETE_P2_ABORT = 0x01;
   static final byte NOTE_TREE_MAIN = 0;
@@ -373,6 +375,8 @@ public class KeycardApplet extends Applet {
       case INS_NOTE_READ:
       case INS_NOTE_DELETE:
       case INS_NOTE_SET_META:
+      case INS_NOTE_NEXT_INDEX:
+      case INS_NOTE_ADVANCE_INDEX:
         processNote(apdu);
         break;
       default:
@@ -456,6 +460,16 @@ public class KeycardApplet extends Applet {
       case INS_NOTE_SET_META:
         checkNoteLength(lc, (short) (32 + metaLen));
         ns.setMeta(tree, entry, apduBuffer, OFFSET_CDATA);
+        break;
+      case INS_NOTE_NEXT_INDEX:
+        checkNoteLength(lc, (short) 0);
+        ns.nextIndex(tree, apduBuffer, OFFSET_CDATA);
+        outLen = 4;
+        break;
+      case INS_NOTE_ADVANCE_INDEX:
+        checkNoteLength(lc, (short) 4);
+        ns.advanceIndex(tree, apduBuffer, OFFSET_CDATA);
+        outLen = 4;
         break;
     }
 
@@ -856,9 +870,14 @@ public class KeycardApplet extends Applet {
    * @param apduBuffer the APDU buffer
    */
   private void loadKeyPair(byte[] apduBuffer) {
+    // Every TLV must lie inside the command data. The APDU buffer past it holds leftovers (under SC V2, this
+    // command's own ciphertext tail), so reading past the end made a plain keypair look extended whenever a leftover
+    // byte equalled TLV_CHAIN_CODE: about 1 load in 256 failed, and a leftover length of 32 would have loaded garbage
+    // as the chain code.
+    short dataEnd = (short) (ISO7816.OFFSET_CDATA + (apduBuffer[ISO7816.OFFSET_LC] & 0xFF));
     short pubOffset = (short)(ISO7816.OFFSET_CDATA + (apduBuffer[(short) (ISO7816.OFFSET_CDATA + 1)] == (byte) 0x81 ? 3 : 2));
-    short privOffset = (short)(pubOffset + apduBuffer[(short)(pubOffset + 1)] + 2);
-    short chainOffset = (short)(privOffset + apduBuffer[(short)(privOffset + 1)] + 2);
+    short privOffset = (short)(pubOffset + (apduBuffer[(short)(pubOffset + 1)] & 0xFF) + 2);
+    short chainOffset = (short)(privOffset + (apduBuffer[(short)(privOffset + 1)] & 0xFF) + 2);
 
     if (apduBuffer[pubOffset] != TLV_PUB_KEY) {
       chainOffset = privOffset;
@@ -866,21 +885,25 @@ public class KeycardApplet extends Applet {
       pubOffset = -1;
     }
 
-    if (!((apduBuffer[ISO7816.OFFSET_CDATA] == TLV_KEY_TEMPLATE) && (apduBuffer[privOffset] == TLV_PRIV_KEY)))  {
+    if (!((apduBuffer[ISO7816.OFFSET_CDATA] == TLV_KEY_TEMPLATE) && (privOffset < dataEnd) && (apduBuffer[privOffset] == TLV_PRIV_KEY)))  {
+      ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+    }
+
+    if ((short) (privOffset + 2 + (apduBuffer[(short) (privOffset + 1)] & 0xFF)) > dataEnd) {
       ISOException.throwIt(ISO7816.SW_WRONG_DATA);
     }
 
     JCSystem.beginTransaction();
 
     try {
-      isExtended = (apduBuffer[chainOffset] == TLV_CHAIN_CODE);
+      isExtended = (chainOffset < dataEnd) && (apduBuffer[chainOffset] == TLV_CHAIN_CODE);
 
       masterPrivate.setS(apduBuffer, (short) (privOffset + 2), apduBuffer[(short) (privOffset + 1)]);
       masterSsk.clearKey();
       hasEd25519Master = false;
 
       if (isExtended) {
-        if (apduBuffer[(short) (chainOffset + 1)] == CHAIN_CODE_SIZE) {
+        if (apduBuffer[(short) (chainOffset + 1)] == CHAIN_CODE_SIZE && (short) (chainOffset + 2 + CHAIN_CODE_SIZE) <= dataEnd) {
           Util.arrayCopy(apduBuffer, (short) (chainOffset + 2), masterChainCode, (short) 0, apduBuffer[(short) (chainOffset + 1)]);
         } else {
           ISOException.throwIt(ISO7816.SW_WRONG_DATA);
