@@ -118,4 +118,11 @@ public class TestKeycardCommandSet extends KeycardCommandSet {
   public APDUResponse exportBIP85(int p1, byte[] data) throws IOException {
     return this.getSecureChannel().transmit(channel, this.getSecureChannel().protectedCommand(0x80, KeycardApplet.INS_EXPORT_BIP85, p1, 0, data));
   }
+
+  /**
+   * Sends any command through the secure channel (used for the note store commands).
+   */
+  public APDUResponse send(int ins, int p1, int p2, byte[] data) throws IOException {
+    return this.getSecureChannel().transmit(channel, this.getSecureChannel().protectedCommand(0x80, ins, p1, p2, data));
+  }
 }

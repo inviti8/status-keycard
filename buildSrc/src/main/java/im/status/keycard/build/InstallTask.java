@@ -65,6 +65,26 @@ public class InstallTask extends DefaultTask {
       } catch(APDUException e) {
         logger.info("Math package already loaded");
       }
+      // The note store outlives Keycard reinstalls (docs/NOTE_STORE.md): deleted only on explicit request, and
+      // only after the Keycard package that depends on it is gone.
+      byte[] notesPackageAid = Hex.decode("A0000008040003");
+      byte[] notesInstanceAid = Hex.decode("A00000080400030101");
+      if ("true".equals(this.getProject().findProperty("im.status.keycard.notes.reinstall"))) {
+        logger.warn("Deleting the note store and every note on the card (im.status.keycard.notes.reinstall)");
+        cmdSet.delete(notesInstanceAid);
+        cmdSet.delete(notesPackageAid);
+      }
+      logger.info("Loading the note store package");
+      try {
+        cmdSet.loadPackage(notesPackageAid, new FileInputStream(this.getProject().file("build/notes/cap/im/status/keycard/notes/javacard/notes.cap")));
+      } catch(APDUException e) {
+        logger.info("Note store package already loaded");
+      }
+      logger.info("Installing the Note Store applet");
+      int notesSW = cmdSet.installForInstall(notesPackageAid, Hex.decode("A000000804000301"), notesInstanceAid, new byte[0]).getSw();
+      if (notesSW != 0x9000) {
+        logger.info("Note store instance not installed (SW " + Integer.toHexString(notesSW) + "), assuming it exists");
+      }
       logger.info("Loading the keycard package");
       cmdSet.loadKeycardPackage(new FileInputStream(this.getProject().file("build/javacard/im/status/keycard/javacard/keycard.cap")), new LoadCallback() {
         @Override

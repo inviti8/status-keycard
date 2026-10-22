@@ -56,6 +56,8 @@ repositories {
 dependencies {
   implementation(files('./keycard-math/keycard-math.jar'))
   javacardExport(files('./keycard-math'))
+  // the note store package is a separate CAP (notesCap); the keycard CAP imports its export file
+  javacardExport(files("${buildDir}/notes/cap"))
   testCompile(files("./jcardsim/jcardsim-3.0.5-SNAPSHOT.jar"))
   testCompile('org.web3j:core:2.3.1')
   testCompile('org.bitcoinj:bitcoinj-core:0.14.5')
@@ -74,9 +76,16 @@ sourceSets {
     java { srcDir 'probe/src' }
     compileClasspath = files("${jcHome}/lib/api_classic.jar")
   }
+  notes {
+    java { srcDir 'notes/src' }
+    compileClasspath = files("${jcHome}/lib/api_classic.jar")
+  }
+  main {
+    compileClasspath += notes.output
+  }
   test {
-    compileClasspath += probe.output
-    runtimeClasspath += probe.output
+    compileClasspath += probe.output + notes.output
+    runtimeClasspath += probe.output + notes.output
   }
 }
 
@@ -141,6 +150,78 @@ task probeCap (type: JavaExec) {
        '-applet', '0xF0:0x4B:0x43:0x50:0x52:0x4F:0x42:0x45:0x01', 'HwProbeApplet',
        'im.status.keycard.probe', '0xF0:0x4B:0x43:0x50:0x52:0x4F:0x42:0x45', '1.0'
 }
+
+// The note store (notes/src, docs/NOTE_STORE.md): its own package so that Keycard reinstalls keep the notes.
+// `./gradlew notesCap` writes build/notes/cap/.../notes.cap and the notes.exp the keycard CAP imports.
+compileNotesJava {
+  sourceCompatibility = 1.6
+  targetCompatibility = 1.6
+}
+
+task notesCap (type: JavaExec) {
+  dependsOn compileNotesJava
+  def outDir = file("${buildDir}/notes/cap")
+  inputs.dir sourceSets.notes.java.outputDir
+  outputs.dir outDir
+  classpath = files(['api_classic', 'tools', 'jctasks', 'commons-logging-1.1', 'commons-httpclient-3.0',
+                     'commons-codec-1.3', 'commons-cli-1.0', 'bcel-5.2', 'asm-all-3.1',
+                     'api_classic_annotations', 'ant-contrib-1.0b3'].collect { "${jcHome}/lib/${it}.jar" })
+  main = 'com.sun.javacard.converter.Main'
+  // the converter compiles Shareable-interface proxies with javac and rejects JDK 11 for that; use JDK 8
+  def jdk8 = project.findProperty('jdk8.home') ?: 'D:/tools/jdk8'
+  if (file("${jdk8}/bin/java.exe").exists() || file("${jdk8}/bin/java").exists()) {
+    executable = file("${jdk8}/bin/java").absolutePath
+  }
+  systemProperty 'jc.home', file(jcHome).absolutePath
+  args '-classdir', sourceSets.notes.java.outputDir,
+       '-exportpath', file("${jcHome}/api_export_files"),
+       '-out', 'CAP', 'EXP', 'JCA',
+       '-d', outDir,
+       '-applet', '0xA0:0x00:0x00:0x08:0x04:0x00:0x03:0x01', 'NoteStoreApplet',
+       'im.status.keycard.notes', '0xA0:0x00:0x00:0x08:0x04:0x00:0x03', '1.0'
+}
+
+// The keycard CAP uses the NoteStore Shareable interface, for which the 3.0.4 converter generates proxy classes and
+// compiles them with javac. That needs a JDK it accepts (8, not 11) and the notes classes on its classpath. The
+// plugin's convertJavacard runs inside the Gradle JVM (JDK 11, which apdu4j needs), so the conversion is done here in
+// a JDK 8 JavaExec with the same applets and AIDs, and convertJavacard only depends on it.
+// keycard and notes classes under one root: the proxy javac resolves imports from -classdir
+task keycardCapClasses (type: Sync) {
+  dependsOn classes, notesClasses
+  from sourceSets.main.java.outputDir
+  from sourceSets.notes.java.outputDir
+  into "${buildDir}/keycardCapClasses"
+}
+
+task keycardCap (type: JavaExec) {
+  dependsOn keycardCapClasses, notesCap
+  def outDir = file("${buildDir}/javacard")
+  inputs.dir sourceSets.main.java.outputDir
+  inputs.dir file("${buildDir}/notes/cap")
+  outputs.dir outDir
+  classpath = files(['api_classic', 'tools', 'jctasks', 'commons-logging-1.1', 'commons-httpclient-3.0',
+                     'commons-codec-1.3', 'commons-cli-1.0', 'bcel-5.2', 'asm-all-3.1',
+                     'api_classic_annotations', 'ant-contrib-1.0b3'].collect { "${jcHome}/lib/${it}.jar" })
+  main = 'com.sun.javacard.converter.Main'
+  def jdk8 = project.findProperty('jdk8.home') ?: 'D:/tools/jdk8'
+  if (file("${jdk8}/bin/java.exe").exists() || file("${jdk8}/bin/java").exists()) {
+    executable = file("${jdk8}/bin/java").absolutePath
+  }
+  systemProperty 'jc.home', file(jcHome).absolutePath
+  args '-classdir', file("${buildDir}/keycardCapClasses"),
+       '-exportpath', [file("${jcHome}/api_export_files"), file('keycard-math'), file("${buildDir}/notes/cap")].join(File.pathSeparator),
+       '-out', 'CAP', 'EXP', 'JCA',
+       '-d', outDir,
+       '-applet', '0xA0:0x00:0x00:0x08:0x04:0x00:0x01:0x01', 'KeycardApplet',
+       '-applet', '0xA0:0x00:0x00:0x08:0x04:0x00:0x01:0x02', 'NDEFApplet',
+       '-applet', '0xA0:0x00:0x00:0x08:0x04:0x00:0x01:0x03', 'CashApplet',
+       '-applet', '0xA0:0x00:0x00:0x08:0x04:0x00:0x01:0x04', 'IdentApplet',
+       'im.status.keycard', '0xA0:0x00:0x00:0x08:0x04:0x00:0x01', '4.0'
+}
+
+convertJavacard.dependsOn keycardCap
+convertJavacard.enabled = false
+tasks.install.dependsOn notesCap
 
 afterEvaluate {
   // -noverify on every target: the test classpath always holds jcardsim's rewritten API classes

@@ -9,6 +9,8 @@ import static javacard.framework.ISO7816.OFFSET_CDATA;
 import static javacard.framework.ISO7816.OFFSET_P1;
 import static javacard.framework.ISO7816.OFFSET_P2;
 
+import im.status.keycard.notes.NoteStore;
+
 /**
  * The applet's main class. All incoming commands are processed by this class.
  */
@@ -31,6 +33,22 @@ public class KeycardApplet extends Applet {
   static final byte INS_EXPORT_KEY = (byte) 0xC2;
   static final byte INS_EXPORT_LEE = (byte) 0xC3;
   static final byte INS_EXPORT_BIP85 = (byte) 0xC4;
+
+  // note store (docs/NOTE_STORE.md), served by the separate im.status.keycard.notes package
+  static final byte INS_NOTE_STATUS = (byte) 0xB0;
+  static final byte INS_NOTE_LIST = (byte) 0xB1;
+  static final byte INS_NOTE_BEGIN = (byte) 0xB2;
+  static final byte INS_NOTE_WRITE = (byte) 0xB3;
+  static final byte INS_NOTE_COMMIT = (byte) 0xB4;
+  static final byte INS_NOTE_READ = (byte) 0xB5;
+  static final byte INS_NOTE_DELETE = (byte) 0xB6;
+  static final byte INS_NOTE_SET_META = (byte) 0xB7;
+
+  static final byte NOTE_DELETE_P2_ABORT = 0x01;
+  static final short NOTE_CHUNK = 240;
+  // scratch space in the APDU buffer for the store's free-block bitmap and entry assembly, past any command data
+  static final short NOTE_SCRATCH_OFF = 128;
+  static final byte[] NOTES_INSTANCE_AID = {(byte) 0xA0, 0x00, 0x00, 0x08, 0x04, 0x00, 0x03, 0x01, 0x01};
   static final byte INS_GET_DATA = (byte) 0xCA;
   static final byte INS_STORE_DATA = (byte) 0xE2;
   static final byte INS_GET_CHALLENGE = (byte) 0x84;
@@ -156,6 +174,7 @@ public class KeycardApplet extends Applet {
   private Crypto crypto;
   private SECP256k1 secp256k1;
   private Ed25519 ed25519;
+  private NoteStore noteStore;
 
   private byte[] derivationOutput;
 
@@ -335,10 +354,128 @@ public class KeycardApplet extends Applet {
       case INS_EXPORT_BIP85:
         exportBIP85(apdu);
         break;
+      case INS_NOTE_STATUS:
+      case INS_NOTE_LIST:
+      case INS_NOTE_BEGIN:
+      case INS_NOTE_WRITE:
+      case INS_NOTE_COMMIT:
+      case INS_NOTE_READ:
+      case INS_NOTE_DELETE:
+      case INS_NOTE_SET_META:
+        processNote(apdu);
+        break;
       default:
         ISOException.throwIt(ISO7816.SW_INS_NOT_SUPPORTED);
         break;
     }
+  }
+
+  /**
+   * Looks up the note store's shareable interface, or returns null when the store package is not installed.
+   */
+  private NoteStore notesOrNull() {
+    if (noteStore == null) {
+      AID aid = JCSystem.lookupAID(NOTES_INSTANCE_AID, (short) 0, (byte) NOTES_INSTANCE_AID.length);
+      if (aid != null) {
+        noteStore = (NoteStore) JCSystem.getAppletShareableInterfaceObject(aid, (byte) 0);
+      }
+    }
+    return noteStore;
+  }
+
+  /**
+   * Processes the note store commands (docs/NOTE_STORE.md). All of them require the PIN, on top of the secure
+   * channel every secured command already has. Note data moves through the APDU buffer only.
+   *
+   * @param apdu the JCRE-owned APDU object.
+   */
+  private void processNote(APDU apdu) {
+    byte[] apduBuffer = apdu.getBuffer();
+
+    if (!pin.isValidated()) {
+      ISOException.throwIt(ISO7816.SW_CONDITIONS_NOT_SATISFIED);
+    }
+
+    NoteStore ns = notesOrNull();
+    if (ns == null) {
+      ISOException.throwIt(ISO7816.SW_FILE_NOT_FOUND);
+    }
+
+    byte entry = apduBuffer[OFFSET_P1];
+    short lc = (short) (apduBuffer[ISO7816.OFFSET_LC] & 0xFF);
+    short metaLen = ns.metaLength();
+    short outLen = 0;
+
+    switch (apduBuffer[ISO7816.OFFSET_INS]) {
+      case INS_NOTE_STATUS:
+        outLen = ns.status(apduBuffer, OFFSET_CDATA, NOTE_SCRATCH_OFF);
+        break;
+      case INS_NOTE_LIST:
+        outLen = ns.list(entry, apduBuffer, OFFSET_CDATA, NOTE_CHUNK);
+        break;
+      case INS_NOTE_BEGIN:
+        checkNoteLength(lc, (short) (2 + 32 + metaLen));
+        apduBuffer[OFFSET_CDATA] = ns.begin(apduBuffer, OFFSET_CDATA, NOTE_SCRATCH_OFF);
+        outLen = 1;
+        break;
+      case INS_NOTE_WRITE:
+        if (lc < 2) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        ns.write(entry, Util.getShort(apduBuffer, OFFSET_CDATA), apduBuffer, (short) (OFFSET_CDATA + 2), (short) (lc - 2));
+        break;
+      case INS_NOTE_COMMIT:
+        checkNoteLength(lc, MessageDigest.LENGTH_SHA_256);
+        noteCommit(apduBuffer, ns, entry);
+        break;
+      case INS_NOTE_READ:
+        checkNoteLength(lc, (short) 3);
+        short readLen = (short) (apduBuffer[(short) (OFFSET_CDATA + 2)] & 0xFF);
+        if (readLen > NOTE_CHUNK) {
+          ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+        }
+        outLen = ns.read(entry, true, Util.getShort(apduBuffer, OFFSET_CDATA), apduBuffer, OFFSET_CDATA, readLen);
+        break;
+      case INS_NOTE_DELETE:
+        checkNoteLength(lc, (short) 32);
+        ns.delete(entry, apduBuffer[OFFSET_P2] == NOTE_DELETE_P2_ABORT, apduBuffer, OFFSET_CDATA);
+        break;
+      case INS_NOTE_SET_META:
+        checkNoteLength(lc, (short) (32 + metaLen));
+        ns.setMeta(entry, apduBuffer, OFFSET_CDATA);
+        break;
+    }
+
+    secureChannel.respond(apdu, outLen, ISO7816.SW_NO_ERROR);
+  }
+
+  private static void checkNoteLength(short lc, short expected) {
+    if (lc != expected) {
+      ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+    }
+  }
+
+  /**
+   * Hashes a WRITING note through the APDU buffer and flips it to HELD if the hash matches the one sent.
+   */
+  private void noteCommit(byte[] apduBuffer, NoteStore ns, byte entry) {
+    Util.arrayCopyNonAtomic(apduBuffer, OFFSET_CDATA, crypto.scratch, (short) 0, MessageDigest.LENGTH_SHA_256);
+    short len = ns.length(entry, false);
+
+    crypto.sha256.reset();
+    short off = 0;
+    while (off < len) {
+      short n = ns.read(entry, false, off, apduBuffer, OFFSET_CDATA, NOTE_CHUNK);
+      crypto.sha256.update(apduBuffer, OFFSET_CDATA, n);
+      off += n;
+    }
+    crypto.sha256.doFinal(apduBuffer, OFFSET_CDATA, (short) 0, apduBuffer, OFFSET_CDATA);
+
+    if (Util.arrayCompare(apduBuffer, OFFSET_CDATA, crypto.scratch, (short) 0, MessageDigest.LENGTH_SHA_256) != 0) {
+      ISOException.throwIt(ISO7816.SW_WRONG_DATA);
+    }
+
+    ns.commit(entry);
   }
 
   private void handleException(APDU apdu, short sw) {
@@ -549,6 +686,11 @@ public class KeycardApplet extends Applet {
         leeChainCode = altChainCode;
         mainPIN.resetAndUnblock();
         pin = altPIN;
+        // only a distinct duress PIN wipes the notes: without one, INIT sets the alt PIN equal to the main PIN
+        // and every unlock lands in case 3
+        if (resp == 2) {
+          wipeNotes();
+        }
         break;
     }
   }
@@ -1006,6 +1148,7 @@ public class KeycardApplet extends Applet {
     }
 
     clearKeys();
+    wipeNotes();
     pin = null;
     mainPIN = null;
     altPIN = null;
@@ -1015,6 +1158,16 @@ public class KeycardApplet extends Applet {
 
     if (JCSystem.isObjectDeletionSupported()) {
       JCSystem.requestObjectDeletion();
+    }
+  }
+
+  /**
+   * Wipes the note store (one atomic epoch increment, so a duress wipe takes no visible extra time).
+   */
+  private void wipeNotes() {
+    NoteStore ns = notesOrNull();
+    if (ns != null) {
+      ns.wipe();
     }
   }
 

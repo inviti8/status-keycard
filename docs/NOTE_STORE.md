@@ -1,8 +1,8 @@
 # NOTE_STORE.md — on-card byte custody
 
-**Status:** design, 2026-10-21. Nothing here is built yet. Decided: D1 (separate package) and the
-duress PIN wipes the notes (D5). Still open (§9): the metadata size, the entry count and the tag,
-which wait on measurements.
+**Status:** built and passing in the simulator, 2026-10-22: `notes/src` and `NoteStoreTest`, 15
+tests. Not yet run on a card. Decided: D1 (separate package), the duress PIN wipes the notes (D5),
+the tag is the ephemeral key, and the meta layout (§9).
 **Scope:** a store for opaque, signed bearer records ("notes") of roughly 1–8 KB each, kept on the
 card next to the keys that own them, so the card alone is the complete wallet.
 
@@ -82,15 +82,16 @@ array under JavaCard's 32,767-byte array limit and avoids per-object overhead fo
 
 ### D3. Two-phase, resumable, tear-safe writes
 
-1. **BEGIN** `(tag, meta, len, sha256)`: picks free blocks and writes their chain cells
+1. **BEGIN** `(len, tag, meta)`: picks free blocks and writes their chain cells
    non-atomically. A tear here leaves those cells unreachable, so they stay free. It then writes the
    entry as `WRITING` in one atomic step. It is refused if the tag is already present.
 2. **WRITE** `(entry, offset, ≤240 B)`: non-atomic copies into the blocks. The writes are
    **addressed by offset**, so they can be sent in any order and repeated. After a tear the host
    lists the store, finds the `WRITING` entry and resends the missing chunks. On a fussy NFC link,
    that resumability is the difference between "tap again" and "start over".
-3. **COMMIT** `(entry)`: the Keycard applet hashes the `len` bytes and compares the result with the
-   BEGIN hash. If they match, it flips the entry to `HELD` in one atomic write. A mismatch returns
+3. **COMMIT** `(entry, sha256)`: the Keycard applet hashes the `len` bytes and compares the result
+   with the hash sent. The hash travels with COMMIT, not BEGIN: the host has the note in hand, and
+   storing a hash per entry would cost 32 B × 64. If they match, it flips the entry to `HELD` in one atomic write. A mismatch returns
    `6A80` and the entry stays `WRITING`.
 
 A note becomes visible as `HELD` only through that single atomic flip, so a tear can never leave a
@@ -115,8 +116,8 @@ on its own, because they may be a resumable upload. The host decides when to abo
 | epoch | 2 | Store epoch at write. An entry whose epoch is not the current one is dead (D5). On the 65,536th wipe the epoch would wrap, and old entries could match it again; that one wipe also sets every entry's status to FREE (slow, once) |
 | len | 2 | Note length in bytes |
 | first | 2 | First block of the chain |
-| tag | 32 | Unique key chosen by the host, e.g. the note's event id. Used to prevent duplicates |
-| meta | `M` (16 assumed) | Opaque to the card, chosen by the host, e.g. owner-key index (4), amount (8), flags (1). Rewritable with SET META |
+| tag | 32 | Unique key chosen by the host. For Kenter it is the note's **ephemeral public key**, the mint's on-chain primary key (`DataKey::Token`), so a LIST row maps straight to a ledger lookup. Not the event id, which is caller-supplied and not unique |
+| meta | `M` (16 by default) | Opaque to the card, rewritable with SET META. Kenter's layout is in §9 |
 
 `meta` is what lets a terminal show a balance or find the note for a given owner index **without
 reading every note**. It is the only field the host may change after commit, and the change is
@@ -167,9 +168,9 @@ On a J3R452 the same CAP takes larger install parameters. Nothing else changes.
 |---|---|---|---|---|---|
 | `B0` | STATUS | — | — | — | `version:1 blocksTotal:2 blocksFree:2 entriesTotal:1 entriesFree:1 metaLen:1` |
 | `B1` | LIST | first entry | — | — | as many `[entry:1 status:1 len:2 tag:32 meta:M]` as fit in 240 B (4 with M = 16); the last byte is the next entry index, or `FF` |
-| `B2` | BEGIN | — | — | `len:2 sha256:32 tag:32 meta:M` | `entry:1` |
+| `B2` | BEGIN | — | — | `len:2 tag:32 meta:M` | `entry:1` |
 | `B3` | WRITE | entry | — | `offset:2 data:≤240` | — |
-| `B4` | COMMIT | entry | — | — | — |
+| `B4` | COMMIT | entry | — | `sha256:32` | — |
 | `B5` | READ | entry | — | `offset:2 length:1` (≤240) | data |
 | `B6` | DELETE | entry | `00` = HELD, `01` = abort WRITING | `tag:32` (must match: guards against deleting the wrong entry) | — |
 | `B7` | SET META | entry | — | `tag:32 meta:M` | — |
@@ -182,8 +183,8 @@ Status words:
 | `6A89` | Tag already present |
 | `6A88` | Entry not found, or dead (wiped epoch) |
 | `6A80` | Hash mismatch at commit, or bad offset or length |
-| `6985` | Wrong entry state, or tag mismatch |
-| `6982` | No PIN or no secure channel |
+| `6985` | Wrong entry state, tag mismatch, or PIN not verified (the Keycard applet's convention) |
+| `6A82` | Store package not installed |
 
 Entry indices are not stable across a delete and re-add, so the tag is the identity of a note. The
 `tag` check on DELETE and SET META makes a stale index fail safely instead of acting on another
@@ -204,17 +205,25 @@ past the command data.
 ## 6. A receive and a spend, end to end
 
 ```
-RECEIVE  verify the note on the host → BEGIN(len, sha256, tag=event_id, meta=owner index…)
-         → WRITE × ceil(len/240) → COMMIT
+RECEIVE  verify the note on the host → BEGIN(len, tag = ephemeral key, meta) → WRITE × ceil(len/240)
+         → COMMIT(sha256) → back up on the desktop → SET META (backed_up)
          (a tear at any point → LIST → resend the missing chunks → COMMIT)
 
-SPEND    LIST / read meta → READ × n → verify on the host → SIGN the spend authorization (existing)
-         → broadcast → on confirmation: DELETE(entry, tag)
-         (never delete before confirmation: until then the card may hold the only copy)
+SPEND    LIST / meta → READ × n → verify on the host → deliver the bytes to the payee
+         → SIGN the spend authorization (existing) → spend() on-chain → SET META (spent_away)
 ```
 
-Marking a note "pending" while its spend is in flight is the host's business, through SET META.
-The card does not link SIGN to a note.
+The card does not link SIGN to a note and never deletes anything on its own. Three host-side rules
+follow, from the Kenter wallet:
+
+- **Bytes reach the payee before the owner pointer moves.** Once `spend()` lands, this holder's key
+  no longer matches the live commitment. A payee who does not have the file by then has nothing to
+  redeem with, and the note is stranded (`kenter-ui` `pay.rs`).
+- **A spent note is marked, not deleted.** The record carries the export history, and the wallet
+  keeps it (`spent_away`). DELETE is a **separate reclaim the holder chooses** to free a slot. It is
+  not the last step of a spend.
+- **Bearer handovers are invisible.** A handover is a file and nothing else, with no transaction to
+  wait for, so a bearer note on the card is never auto-deleted.
 
 ## 7. Wear
 
@@ -243,19 +252,48 @@ fuzz test shows a hot spot, rotate the entry allocation.
   - Lift the card mid-WRITE on purpose over NFC, then resume.
   - Time a 1.5 KB receive and spend.
 
-## 9. Open decisions
+## 9. Decisions
 
-Decided 2026-10-21: separate package (D1); the duress PIN wipes the notes (D5); the desktop's
-encrypted backup is the recovery path for note bytes; an 8 KB maximum note size (24 pairs is about
-7.6 KB).
+Decided 2026-10-21/22:
 
-Still open. These need data first, so the build makes them install parameters:
+- **Package:** separate (D1).
+- **Duress PIN:** wipes the notes (D5).
+- **Recovery:** the desktop's encrypted backup is the recovery path for note bytes.
+- **Tag:** the ephemeral public key.
+- **Maximum note size: 8 KB.** That is 24 pairs at about 7.6 KB, which is also the mainnet cap
+  that `REDEEM.md` §5 recommends on instruction-budget grounds. The two limits arrive at the same
+  number from different directions. The hard ceiling is 33 pairs, beyond which Path B redemption no
+  longer fits Soroban's budget.
 
-1. **`meta` contents and size.** The candidate is owner index (4) + amount (8) + flags (1), which
-   comes to 16 B with room to spare. Confirm against what the wallet needs to show a balance and
-   pick a note without reading every note.
-2. **The tag.** It must be unique per note. Is it the event id, or the ephemeral public key (the
-   ledger key)? If several notes can come from one print event, the event id is not unique.
-3. **Entries vs blocks.** This depends on the real mix of pairs per note. 64 entries cover the
-   worst case (all 2-pair notes: 49) with margin. Settle it with the on-card fill test (§8) against
-   a realistic mix.
+**Kenter's meta layout (16 B, the default)**, taken from what the billfold renders per note
+(`NoteCard`):
+
+| Field | Bytes | Note |
+|---|---|---|
+| amount | 8 | u64 |
+| owner_index | 4 | u32, spend mode. Not `owner_commitment`: that is re-derivable on the card from the index |
+| pairs | 1 | Needed for `redeems_for` = face − `node_fee` × 2 × pairs. Store the count, not the result, because `node_fee` is mint config |
+| exposure | 1 | Parties that may hold a redeemable copy (saturating) |
+| flags | 1 | spend_mode, spent_away, marked_spent, **backed_up** |
+| spare | 1 | — |
+
+`backed_up` matters more on a card than anywhere else: a duress wipe loses every note received since
+the last backup, and this flag is how the wallet can tell the holder they are exposed. If 24 B is
+affordable, the next field is `imported_at` (u32 seconds) for ordering; `label` belongs in the
+desktop backup.
+
+**Capacity.** Measured in the simulator at the J3R200 default of 248 blocks and 64 entries, by
+filling the store:
+
+| Pairs | Note size | Notes per card |
+|---|---|---|
+| 2 | 1,272 B | 49 |
+| 3 | 1,562 B | 35 |
+| 4 | 1,852 B | 31 |
+| 10 | 3,592 B | 16 |
+| 24 | 7,652 B | 8 |
+
+The realistic mix is 3–4 pairs: the UI default is 3, a node network uses nodes + 2, and the
+deployed testnet maximum is 10. That means roughly 31–35 notes per J3R200. With 64 entries, entries
+run out only for notes under ~1 KB, so the entry count is not the constraint. The open number is the
+block count, which the on-card fill test settles against real free NVM.
