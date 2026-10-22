@@ -206,9 +206,10 @@ public class KeycardTest {
     Certificate cert = Certificate.createCertificate(caKeyPair, identKeyPair);
     IdentCommandSet idCmdSet = new IdentCommandSet(sdkChannel);
     idCmdSet.select().checkOK();
-    idCmdSet.storeData(cert.toStoreData()).checkOK();
+    // write-once: a card from an earlier run already holds a certificate from the same test CA
+    idCmdSet.storeData(cert.toStoreData()).checkSW(0x9000, 0x6985);
 
-    KeycardCommandSet cmdSet = new KeycardCommandSet(sdkChannel, ((org.bouncycastle.jce.interfaces.ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(true));
+    KeycardCommandSet cmdSet = new KeycardCommandSet(sdkChannel,((org.bouncycastle.jce.interfaces.ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(true));
     cmdSet.select().checkOK();
 
     initCapabilities(cmdSet.getApplicationInfo());

@@ -50,7 +50,8 @@ Buy blank JavaCards directly:
 ## GATE-0: which chip + crypto core
 
 The Ed25519 implementation in this fork is **Core C** — software Ed25519 riding the native EC engine
-over Wei25519 (see `ED25519.md`). It runs on **any** J3R200 or J3R452 today, with no NDA. Its one
+over Wei25519 (see `ED25519.md`). It is **verified on a J3R200 (JCOP4 P71) as of 2026-10-21** (see
+`ONMETAL_REPORT.md`) and needs no NDA; the J3R452 is the same P71 family but has not been run yet. Its one
 caveat is side-channel hardness: the scalar arithmetic `S = k·s + r mod L` runs in software
 (`BigNumberMath`), the same exposure class as the existing BIP-340 Schnorr path — acceptable for
 many uses, but review before a high-assurance deployment.
@@ -59,13 +60,12 @@ Two stronger options exist and both hinge on a hardware question that a J3R452 s
 
 | Core | What | Gate |
 |---|---|---|
-| **A. Native EdDSA** | JavaCard 3.1 `SIG_CIPHER_EDDSA` / `buildXECKey` on J3R452 | Whether an ordinary CAP with default GP keys can call it, or whether it is NXP-proprietary / NDA-gated. **Unverified — this is GATE-0.** |
+| **A. Native EdDSA** | JavaCard 3.1 `SIG_CIPHER_EDDSA` / `buildXECKey` on J3R452 | **Closed 2026-10-20:** a distributor AlgTest run on a J3R452 reports `SIG_CIPHER_EDDSA` and `ALG_XDH` unsupported for an ordinary CAP. |
 | **B. SecureBox** | NXP native-C sandbox implementing Ed25519 | NXP partner / NDA (Cryptnox ships crypto this way). |
-| **C. Software (this fork)** | Wei25519 + `BigNumberMath`, as built | None. Works now. |
+| **C. Software (this fork)** | Wei25519 + `BigNumberMath`, as built | None. **Verified on J3R200 on 2026-10-21** with a 512-bit zero-padded RSA private key for inversion and Wei25519 cofactor 1 (the chip refuses 256-bit RSA and cofactor 8). |
 
-**GATE-0 action:** get a J3R452 sample and confirm with the distributor / NXP whether native EdDSA
-is callable from a default-keyed CAP. That single answer decides cost (free vs NDA/partner) and the
-production card model. Core C is the fallback that ships regardless.
+**GATE-0 outcome:** native EdDSA is not callable from an ordinary CAP on the J3R452, so Core C is
+the shipping core. Remaining hardware check: run the probe and suite on a J3R452 sample.
 
 ## Production lifecycle per card
 
