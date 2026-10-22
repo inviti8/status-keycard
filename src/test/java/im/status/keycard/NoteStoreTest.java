@@ -133,10 +133,9 @@ public class NoteStoreTest {
     void connect(CardTerminal terminal) throws Exception {
       PCSCCardChannel channel = new PCSCCardChannel(terminal.connect("*").getBasicChannel());
       ca = caKeyPair();
-      Certificate cert = Certificate.createCertificate(ca, Certificate.generateIdentKeyPair());
       IdentCommandSet idCmdSet = new IdentCommandSet(channel);
       idCmdSet.select().checkOK();
-      idCmdSet.storeData(cert.toStoreData()).checkSW(0x9000, 0x6985); // write-once
+      idCmdSet.storeData(TestIdentity.certStoreData(ca)).checkSW(0x9000, 0x6985); // write-once
       byte[] caPub = ((org.bouncycastle.jce.interfaces.ECPublicKey) ca.getPublic()).getQ().getEncoded(true);
       cmdSet = new TestKeycardCommandSet(channel, caPub);
       initIfNeeded();

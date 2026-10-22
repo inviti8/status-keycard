@@ -96,12 +96,11 @@ public class StellarM4Test {
     CardChannel channel = card.getBasicChannel();
     PCSCCardChannel sdkChannel = new PCSCCardChannel(channel);
 
-    im.status.keycard.applet.Certificate cert = Certificate.createCertificate(caKeyPair, Certificate.generateIdentKeyPair());
     IdentCommandSet idCmdSet = new IdentCommandSet(sdkChannel);
     idCmdSet.select().checkOK();
     // the identity certificate is write-once: on a card KeycardTest may already have stored one,
     // signed by the same test CA, so 6985 is fine
-    idCmdSet.storeData(cert.toStoreData()).checkSW(0x9000, 0x6985);
+    idCmdSet.storeData(TestIdentity.certStoreData(caKeyPair)).checkSW(0x9000, 0x6985);
 
     byte[] caCompressed = ((org.bouncycastle.jce.interfaces.ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(true);
     cmdSet = new KeycardCommandSet(sdkChannel, caCompressed);

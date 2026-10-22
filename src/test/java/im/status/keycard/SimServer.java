@@ -131,12 +131,10 @@ public class SimServer {
     CardChannel channel = card.getBasicChannel();
     PCSCCardChannel sdkChannel = new PCSCCardChannel(channel);
 
-    KeyPair identKeyPair = Certificate.generateIdentKeyPair();
-    Certificate cert = Certificate.createCertificate(caKeyPair, identKeyPair);
 
     IdentCommandSet idCmdSet = new IdentCommandSet(sdkChannel);
     idCmdSet.select().checkOK();
-    idCmdSet.storeData(cert.toStoreData()).checkOK();
+    idCmdSet.storeData(TestIdentity.certStoreData(caKeyPair)).checkOK();
   }
 
   private void serve(int port) throws Exception {
