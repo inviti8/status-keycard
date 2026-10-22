@@ -104,3 +104,37 @@ must reuse existing transient buffers.
 8. NFC coupling: the card works only in a narrow spot on the reader. Elsewhere it answers
    ATR/ATS, browns out on the first real command, and the reader resets (`READER_UNAVAILABLE`)
    every ~1.6 s. Use a contact reader for loads where possible.
+
+## Note store on the card (2026-10-22)
+
+The note store (`docs/NOTE_STORE.md`) installed as its own package (`A0000008040003`) ahead of the
+Keycard package. The full suite then ran on the card: KeycardTest 25/25 and StellarM4Test 1/1 again,
+and **NoteStoreTest 11/11**. The 4 skipped tests are simulator-only because they need a fresh card:
+install parameters, reinstall survival, no duress PIN configured, and factory reset.
+
+**Capacity on the card**, by filling the store at the default 248 blocks and 64 entries. It matches
+the simulator exactly:
+
+| Pairs | 2 | 3 | 4 | 10 | 24 |
+|---|---|---|---|---|---|
+| Note size | 1,272 B | 1,562 B | 1,852 B | 3,592 B | 7,652 B |
+| Notes | 49 | 35 | 31 | 16 | 8 |
+
+**Memory**, from probe INS `03`, with the probe installed in both rows:
+
+| State | Persistent | Transient reset | Transient deselect |
+|---|---|---|---|
+| Fork + probe (before) | 84,868 B | 94 B | 2,592 B |
+| Fork + note store + probe | **13,548 B** | **88 B** | 2,592 B |
+
+The store takes 71,320 B: 67,504 B of pool, chain table and directory, plus about 3.8 KB of package
+code and object overhead. It takes 6 B of CLEAR_ON_RESET RAM, not the 0 B the design estimated. That
+is consistent with the per-instance cost of one more applet, which the store applet code does not
+allocate itself. Removing the probe frees a few more KB of NVM.
+
+**Speed over this NFC link:** the capacity fill wrote 139 notes (293 KB) in 665 s, about **440 B/s**
+end to end. That includes BEGIN, the 240-byte WRITE chunks through SC V2, and the COMMIT hash. So a
+typical 3–4 pair receive takes roughly 3.5–4.5 s, and the `roundTrip` test (store a 3-pair note, then
+read it back, LIST and STATUS) took 7.8 s. That is slower than the ~1 s estimate in
+`SHELL_KENTER.md` §6.3. Where the time goes (NFC framing, AES-CCM, NVM writes) has not been
+measured, nor has a contact reader.

@@ -1,7 +1,8 @@
 # NOTE_STORE.md — on-card byte custody
 
-**Status:** built and passing in the simulator, 2026-10-22: `notes/src` and `NoteStoreTest`, 15
-tests. Not yet run on a card. Decided: D1 (separate package), the duress PIN wipes the notes (D5),
+**Status:** built, 2026-10-22: `notes/src` and `NoteStoreTest`. **Verified on a J3R200** (11/11 on
+the card, 15/15 in the simulator): capacity matches, the store takes 71.3 KB at the default sizes,
+and a typical receive takes about 4 s over NFC (`ONMETAL_REPORT.md`). Decided: D1 (separate package), the duress PIN wipes the notes (D5),
 the tag is the ephemeral key, and the meta layout (§9).
 **Scope:** a store for opaque, signed bearer records ("notes") of roughly 1–8 KB each, kept on the
 card next to the keys that own them, so the card alone is the complete wallet.
