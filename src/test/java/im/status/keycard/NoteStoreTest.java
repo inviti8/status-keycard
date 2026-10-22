@@ -314,8 +314,9 @@ public class NoteStoreTest {
     assertEquals(s.blocksTotal, s.blocksFree);
     assertEquals(s.entriesTotal, s.entriesFree);
     if (SIMULATOR) {
-      assertEquals(248, s.blocksTotal);
-      assertEquals(64, s.entriesTotal);
+      // 248 blocks / 64 entries, less the duress share (1/8: 31 blocks, 8 entries)
+      assertEquals(217, s.blocksTotal);
+      assertEquals(56, s.entriesTotal);
       assertEquals(16, s.metaLen);
     }
     assertEquals(0, list(s.metaLen).size());
@@ -459,6 +460,10 @@ public class NoteStoreTest {
   @Test
   @DisplayName("the duress PIN sees its own empty store; the main PIN's notes are hidden, not wiped")
   void duressHides() throws Exception {
+    assertEquals(SW_OK, rig.cmdSet.verifyPIN(DURESS_PIN).getSw());
+    Status duressEmpty = status();
+    assertEquals(SW_OK, rig.cmdSet.verifyPIN(PIN).getSw());
+
     byte[][] notes = new byte[3][];
     byte[][] tags = new byte[3][];
     int[] entries = new int[3];
@@ -467,13 +472,15 @@ public class NoteStoreTest {
       tags[i] = tag();
       entries[i] = store(notes[i], tags[i], new byte[16]);
     }
-    Status mainStatus = status();
 
     assertEquals(SW_OK, rig.cmdSet.verifyPIN(DURESS_PIN).getSw());
     Status s = status();
+    // the duress view does not move when the main tree fills: nothing to compute the hidden notes from
+    assertEquals(duressEmpty.blocksTotal, s.blocksTotal);
+    assertEquals(duressEmpty.blocksFree, s.blocksFree);
+    assertEquals(duressEmpty.entriesTotal, s.entriesTotal);
+    assertEquals(duressEmpty.entriesFree, s.entriesFree);
     assertEquals(s.blocksTotal, s.blocksFree, "an empty tree reads as an empty store");
-    assertEquals(s.entriesTotal, s.entriesFree);
-    assertEquals(mainStatus.blocksTotal - 3 * 7, s.blocksTotal);
     assertEquals(0, list(16).size());
     // the main notes are unreachable by index, and their tags are not compared (no existence oracle)
     assertEquals(SW_NOT_FOUND, rig.send(KeycardApplet.INS_NOTE_READ, entries[0], 0, concat(u16(0), new byte[] {16})).getSw());
@@ -489,6 +496,38 @@ public class NoteStoreTest {
       assertArrayEquals(notes[i], readAll(entries[i], notes[i].length));
     }
     assertEquals(SW_NOT_FOUND, rig.send(KeycardApplet.INS_NOTE_READ, decoyEntry, 0, concat(u16(0), new byte[] {16})).getSw());
+  }
+
+  @Test
+  @DisplayName("the duress tree has a fixed share: it fills on its own and leaves the main share whole")
+  void duressShare() throws Exception {
+    Status mainEmpty = status();
+    assertEquals(SW_OK, rig.cmdSet.verifyPIN(DURESS_PIN).getSw());
+    Status d = status();
+    if (SIMULATOR) {
+      assertEquals(31, d.blocksTotal);
+      assertEquals(8, d.entriesTotal);
+    }
+    byte[] note = bytes(noteSize(3));
+    int stored = 0;
+    while (true) {
+      APDUResponse r = begin(note.length, tag(), new byte[16]);
+      if (r.getSw() == SW_FULL) {
+        break;
+      }
+      assertEquals(SW_OK, r.getSw());
+      int entry = r.getData()[0] & 0xff;
+      writeAll(entry, note);
+      assertEquals(SW_OK, commit(entry, note).getSw());
+      stored++;
+    }
+    assertEquals(Math.min(d.blocksTotal / 7, d.entriesTotal), stored);
+
+    assertEquals(SW_OK, rig.cmdSet.verifyPIN(PIN).getSw());
+    Status m = status();
+    assertEquals(mainEmpty.blocksTotal, m.blocksTotal);
+    assertEquals(mainEmpty.blocksFree, m.blocksFree);
+    assertEquals(mainEmpty.entriesFree, m.entriesFree);
   }
 
   @Test
@@ -585,15 +624,14 @@ public class NoteStoreTest {
     rig = Rig.simulator(new byte[] {0x01, 0x00, 0x06, (byte) 0xC9, 0x04, 0x00, 0x14, 0x03, 0x18}, true);
     empty();
     Status s = status();
-    assertEquals(20, s.blocksTotal);
-    assertEquals(3, s.entriesTotal);
+    assertEquals(18, s.blocksTotal);  // 20 less the duress share (2)
+    assertEquals(2, s.entriesTotal);  // 3 less the duress share (1)
     assertEquals(24, s.metaLen);
 
     byte[] meta = bytes(24);
     byte[] note = bytes(600);
     int entry = store(note, tag(), meta);
     assertArrayEquals(meta, Arrays.copyOfRange(list(24).get(0), 36, 60));
-    store(bytes(10), tag(), new byte[24]);
     store(bytes(10), tag(), new byte[24]);
     assertEquals(SW_FULL, begin(10, tag(), new byte[24]).getSw()); // out of entries, not blocks
     assertArrayEquals(note, readAll(entry, note.length));

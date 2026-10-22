@@ -62,6 +62,10 @@ public class NoteStoreApplet extends Applet implements NoteStore {
 
   private final short blocks;
   private final short entries;
+  // The duress tree's fixed share (1/8, at least 1) of blocks and entries; the main tree gets the rest. Each tree's
+  // STATUS depends only on its own notes, so the duress view never reveals how much the main tree holds.
+  private final short duressBlocks;
+  private final short duressEntries;
   private final byte metaLen;
   private final short entrySize;
   private final byte[] dir;
@@ -94,12 +98,14 @@ public class NoteStoreApplet extends Applet implements NoteStore {
       }
     }
 
-    if (b < 1 || b > MAX_BLOCKS || e < 1 || e > MAX_ENTRIES || m < 0 || m > MAX_META_LEN) {
+    if (b < 2 || b > MAX_BLOCKS || e < 2 || e > MAX_ENTRIES || m < 0 || m > MAX_META_LEN) {
       ISOException.throwIt(ISO7816.SW_WRONG_DATA);
     }
 
     blocks = b;
     entries = e;
+    duressBlocks = (short) (b >= 16 ? b >> 3 : 1);
+    duressEntries = (short) (e >= 16 ? e >> 3 : 1);
     metaLen = m;
     entrySize = (short) (E_META + m);
     dir = new byte[(short) (e * entrySize)];
@@ -135,29 +141,15 @@ public class NoteStoreApplet extends Applet implements NoteStore {
   // NoteStore
 
   public short status(byte tree, byte[] buf, short off, short scratchOff) {
-    short free = computeFree(buf, scratchOff);
-    short own = 0;
-    short other = 0;
-    short otherBlocks = 0;
-    for (short e = 0; e < entries; e++) {
-      short eo = (short) (e * entrySize);
-      if (!isLive(eo)) {
-        continue;
-      }
-      if (ownedBy(eo, tree)) {
-        own++;
-      } else {
-        other++;
-        otherBlocks += blocksFor(Util.getShort(dir, (short) (eo + E_LEN)));
-      }
-    }
+    // derived from this tree's notes alone: nothing about the other tree, not even its size, shows here
+    short capBlocks = blockShare(tree);
+    short capEntries = entryShare(tree);
 
-    // the other tree's notes are left out of the totals, so an empty tree reads as an empty store
     buf[off] = STORE_VERSION;
-    Util.setShort(buf, (short) (off + 1), (short) (blocks - otherBlocks));
-    Util.setShort(buf, (short) (off + 3), free);
-    buf[(short) (off + 5)] = (byte) (entries - other);
-    buf[(short) (off + 6)] = (byte) (entries - other - own);
+    Util.setShort(buf, (short) (off + 1), capBlocks);
+    Util.setShort(buf, (short) (off + 3), (short) (capBlocks - usedBlocks(tree)));
+    buf[(short) (off + 5)] = (byte) capEntries;
+    buf[(short) (off + 6)] = (byte) (capEntries - usedEntries(tree));
     buf[(short) (off + 7)] = metaLen;
     return 8;
   }
@@ -211,7 +203,12 @@ public class NoteStoreApplet extends Applet implements NoteStore {
       }
     }
 
+    // The tree's share is the limit. The shares add up to the store, so a slot and the physical blocks exist whenever
+    // the share has room; the checks below them are a safeguard.
     short needed = blocksFor(len);
+    if (usedEntries(tree) >= entryShare(tree) || (short) (usedBlocks(tree) + needed) > blockShare(tree)) {
+      ISOException.throwIt(ISO7816.SW_FILE_FULL);
+    }
     if (slot < 0 || computeFree(buf, scratchOff) < needed) {
       ISOException.throwIt(ISO7816.SW_FILE_FULL);
     }
@@ -302,6 +299,37 @@ public class NoteStoreApplet extends Applet implements NoteStore {
   }
 
   // internals
+
+  private short blockShare(byte tree) {
+    return tree != 0 ? duressBlocks : (short) (blocks - duressBlocks);
+  }
+
+  private short entryShare(byte tree) {
+    return tree != 0 ? duressEntries : (short) (entries - duressEntries);
+  }
+
+  /** Blocks occupied by the tree's live notes. */
+  private short usedBlocks(byte tree) {
+    short b = 0;
+    for (short e = 0; e < entries; e++) {
+      short eo = (short) (e * entrySize);
+      if (ownedBy(eo, tree)) {
+        b += blocksFor(Util.getShort(dir, (short) (eo + E_LEN)));
+      }
+    }
+    return b;
+  }
+
+  /** The tree's live notes. */
+  private short usedEntries(byte tree) {
+    short n = 0;
+    for (short e = 0; e < entries; e++) {
+      if (ownedBy((short) (e * entrySize), tree)) {
+        n++;
+      }
+    }
+    return n;
+  }
 
   private static byte treeBit(byte tree) {
     return tree != 0 ? STATUS_TREE_DURESS : 0;

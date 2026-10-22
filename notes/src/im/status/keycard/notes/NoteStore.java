@@ -16,10 +16,12 @@ import javacard.framework.Shareable;
  */
 public interface NoteStore extends Shareable {
   /**
-   * Writes {@code version:1 blocksTotal:2 blocksFree:2 entriesTotal:1 entriesFree:1 metaLen:1} at off, as seen
-   * from the tree: the other tree's notes are taken out of the totals, so an empty tree shows free == total.
+   * Writes {@code version:1 blocksTotal:2 blocksFree:2 entriesTotal:1 entriesFree:1 metaLen:1} at off for the
+   * tree's own share of the store: the duress tree has a fixed 1/8 of blocks and entries, the main tree the rest.
+   * Nothing about the other tree's notes enters these numbers.
    *
-   * @param scratchOff start of scratch space in buf for the free-block bitmap (blocks/8 bytes)
+   * @param scratchOff scratch space in buf past the output; unused since the shares made the free-block walk
+   *                   unnecessary, kept so the frozen signature does not change
    * @return the number of bytes written (8)
    */
   short status(byte tree, byte[] buf, short off, short scratchOff);

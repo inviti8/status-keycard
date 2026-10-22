@@ -1,9 +1,13 @@
 # NOTE_STORE.md — on-card byte custody
 
-**Status:** built, 2026-10-22: `notes/src` and `NoteStoreTest`. **Verified on a J3R200** (11/11 on
-the card, 15/15 in the simulator): capacity matches, the store takes 71.3 KB at the default sizes,
-and a typical receive takes about 4 s over NFC (`ONMETAL_REPORT.md`). Decided: D1 (separate package), the duress PIN wipes the notes (D5),
-the tag is the ephemeral key, and the meta layout (§9).
+**Status:** built, 2026-10-22: `notes/src` and `NoteStoreTest`.
+- **First version verified on a J3R200:** 11/11 on the card. Capacity matched, the store took
+  71.3 KB at the default sizes, and a typical receive took about 4 s over NFC (`ONMETAL_REPORT.md`).
+- **Duress change, simulator only so far:** the duress PIN now hides the notes behind a fixed share
+  instead of wiping them (D5). 18/18 in the simulator; not yet run on the card.
+
+Decided: D1 (separate package), duress = hide with a fixed share (D5), the tag is the ephemeral key,
+and the meta layout (§9).
 **Scope:** a store for opaque, signed bearer records ("notes") of roughly 1–8 KB each, kept on the
 card next to the keys that own them, so the card alone is the complete wallet.
 
@@ -104,7 +108,7 @@ half-written note that looks valid. Each tear point:
 | WRITE | Entry `WRITING`, some blocks partly written | Resend chunks (the hash check catches any gaps) |
 | COMMIT | The flip is atomic: either `WRITING` or `HELD` | LIST shows which |
 | DELETE | One status byte, atomic: either intact or gone | LIST shows which |
-| Duress wipe | The epoch, atomic | Nothing to recover |
+| Wipe (FACTORY RESET) | The epoch, atomic | Nothing to recover |
 
 `ABORT (entry)` frees a `WRITING` entry. A new BEGIN does **not** reclaim stale `WRITING` entries
 on its own, because they may be a resumable upload. The host decides when to abort them.
@@ -113,7 +117,7 @@ on its own, because they may be a resumable upload. The host decides when to abo
 
 | Field | Size | Meaning |
 |---|---|---|
-| status | 1 | `FREE` / `WRITING` / `HELD` |
+| status | 1 | `FREE` / `WRITING` / `HELD` in the low bits. The top bit is the owning tree: 0 = main PIN, 1 = duress PIN (D5) |
 | epoch | 2 | Store epoch at write. An entry whose epoch is not the current one is dead (D5). On the 65,536th wipe the epoch would wrap, and old entries could match it again; that one wipe also sets every entry's status to FREE (slow, once) |
 | len | 2 | Note length in bytes |
 | first | 2 | First block of the chain |
@@ -128,21 +132,35 @@ atomic.
 
 - **Every** command requires an open secure channel and a verified PIN, including LIST and STATUS.
   This is the existing gate used by SIGN and EXPORT KEY.
-- **The duress PIN wipes the notes** *(decided)*. Verifying the alternate PIN increments the store
-  epoch. That is one atomic 2-byte write, so every existing entry is dead at once and the response
-  takes no longer than an ordinary VERIFY PIN. A slow wipe would tell the person applying pressure
-  what had happened.
-  - **What the duress session sees:** after the wipe, an empty store with full free capacity, so
-    nothing is left over to explain.
-  - **Physical overwrite:** the wipe is logical. Dead blocks keep their bytes until a later BEGIN
-    reuses and overwrites them, and dead entries keep their tag and meta until reused. That data
-    stays inside the secure element and no command can reach it. Overwriting all 63 KB at wipe time
-    would take seconds and give the wipe away.
-  - **The cost:** a duress wipe is unrecoverable on the card. The notes come back from the
-    desktop's encrypted backup, which covers everything except notes received since the last
-    backup. The wallet should back up after every receipt anyway (`backup.rs`: "the blobs on every
-    single receipt").
-- **FACTORY RESET wipes the store** with the same epoch bump, and it inherits our PIN gate on wipe.
+- **The duress PIN hides the notes; it does not wipe them** *(decided)*. This matches standard
+  Keycard, where the duress PIN opens a decoy wallet and destroys nothing. Every note records the
+  tree that wrote it, main PIN or duress PIN, in its status byte. Each tree:
+  - lists, reads, counts and deletes only its own notes;
+  - gets `6A88` (not found) for the other tree's entry indexes;
+  - compares tags only against its own notes. Refusing a duplicate the other tree holds would
+    reveal that note exists.
+
+  The next main-PIN unlock shows everything as before. The duress PIN also derives decoy Ed25519
+  keys (`KeycardApplet.ed25519ChainCode`), so the authority to spend stays hidden along with the
+  bytes.
+- **The duress tree has a fixed share, so its view gives nothing away.** It owns 1/8 of the blocks
+  and entries (31 and 8 at the default sizes); the main tree owns the rest. Each tree's STATUS is
+  computed from its own share and its own notes only. Whatever the main tree holds, the duress PIN
+  always sees the same store: empty, with full free space, about 4 decoy notes' worth. Without the
+  share, the totals would come out as capacity minus the hidden notes, and anyone who knows the
+  default sizes could do the arithmetic. The cost is about 12% of the main tree's capacity (§9).
+  - **Residual:** BEGIN still walks every chain to find free blocks, so its time varies slightly
+    with what the card holds. The difference is far below NFC framing noise, but it is not exactly
+    zero.
+- **Limits inherent to a duress PIN.** Someone holding the duress PIN can deny the holder access
+  but cannot reach the real wallet:
+  - **Lock-out:** wrong guesses after a duress unlock block the main PIN, and the duress PIN no
+    longer resets its counter (upstream #129). A PUK changed from a duress session can only ever
+    unblock the duress PIN. Notes and keys then come back from the desktop backup and the phrase.
+  - **Wipe:** FACTORY RESET is allowed under the duress PIN, like the main PIN, so the two stay
+    indistinguishable. It wipes both trees.
+- **FACTORY RESET wipes the store** (both trees) with one epoch increment, and it inherits our PIN gate
+  on wipe.
 
 ### D6. Allocation and sizing
 
@@ -159,7 +177,8 @@ Keycard package, because the Keycard package depends on it.
 | Chain table | 496 B |
 | Directory | 64 × 55 B = 3,520 B (with M = 16) |
 | **Store total** | **≈ 67.5 KB** of the 84.9 KB measured. About 17 KB stays free for code growth (for example verify-after-sign) |
-| Capacity | 49 two-pair notes (1,272 B, 5 blocks); 35 three-pair (7 blocks); 27 five-pair (9 blocks); 8 at 24 pairs (30 blocks) |
+| Main tree | 217 blocks / 56 entries: 43 two-pair notes, 31 three-pair, 27 four-pair, 14 at 10 pairs, 7 at 24 pairs |
+| Duress tree | 31 blocks / 8 entries (the fixed 1/8 share): about 4 three-pair decoy notes |
 
 On a J3R452 the same CAP takes larger install parameters. Nothing else changes.
 
@@ -182,7 +201,7 @@ Status words:
 |---|---|
 | `6A84` | No free blocks or entries |
 | `6A89` | Tag already present |
-| `6A88` | Entry not found, or dead (wiped epoch) |
+| `6A88` | Entry not found: dead (wiped epoch), or owned by the other PIN's tree |
 | `6A80` | Hash mismatch at commit, or bad offset or length |
 | `6985` | Wrong entry state, tag mismatch, or PIN not verified (the Keycard applet's convention) |
 | `6A82` | Store package not installed |
@@ -238,7 +257,7 @@ fuzz test shows a hot spot, rotate the entry allocation.
 - **Simulator:**
   - Every command and every status word.
   - Tear injection at each step (fail the APDU mid-WRITE, then resume).
-  - Duress wipe: the epoch bump, an empty store afterwards, and response time unchanged.
+  - Duress hiding: each PIN sees only its own notes, the duress view is fixed whatever the main tree holds, and the duress share fills on its own.
   - Fill to capacity.
   - Hash mismatch.
   - Stale-index DELETE.
@@ -258,7 +277,9 @@ fuzz test shows a hot spot, rotate the entry allocation.
 Decided 2026-10-21/22:
 
 - **Package:** separate (D1).
-- **Duress PIN:** wipes the notes (D5).
+- **Duress PIN:** hides the notes behind a fixed 1/8 share, and derives decoy Ed25519 keys (D5).
+  This replaces "wipes the notes" (2026-10-21), which differed from how the standard duress PIN
+  works and could be detected by someone who knew what the card held.
 - **Recovery:** the desktop's encrypted backup is the recovery path for note bytes.
 - **Tag:** the ephemeral public key.
 - **Maximum note size: 8 KB.** That is 24 pairs at about 7.6 KB, which is also the mainnet cap
@@ -278,23 +299,23 @@ Decided 2026-10-21/22:
 | flags | 1 | spend_mode, spent_away, marked_spent, **backed_up** |
 | spare | 1 | — |
 
-`backed_up` matters more on a card than anywhere else: a duress wipe loses every note received since
-the last backup, and this flag is how the wallet can tell the holder they are exposed. If 24 B is
+`backed_up` is how the wallet can tell the holder that a note exists only on the card: a lost or
+broken card, or a forced wipe, loses every note not yet backed up. If 24 B is
 affordable, the next field is `imported_at` (u32 seconds) for ordering; `label` belongs in the
 desktop backup.
 
-**Capacity.** Measured in the simulator at the J3R200 default of 248 blocks and 64 entries, by
-filling the store:
+**Capacity.** The main tree at the J3R200 default (248 blocks / 64 entries, less the duress
+share: 217 blocks / 56 entries), measured in the simulator by filling the store:
 
-| Pairs | Note size | Notes per card |
-|---|---|---|
-| 2 | 1,272 B | 49 |
-| 3 | 1,562 B | 35 |
-| 4 | 1,852 B | 31 |
-| 10 | 3,592 B | 16 |
-| 24 | 7,652 B | 8 |
+| Pairs | Note size | Main-tree notes | Without the duress share |
+|---|---|---|---|
+| 2 | 1,272 B | 43 | 49 |
+| 3 | 1,562 B | 31 | 35 |
+| 4 | 1,852 B | 27 | 31 |
+| 10 | 3,592 B | 14 | 16 |
+| 24 | 7,652 B | 7 | 8 |
 
-The realistic mix is 3–4 pairs: the UI default is 3, a node network uses nodes + 2, and the
-deployed testnet maximum is 10. That means roughly 31–35 notes per J3R200. With 64 entries, entries
-run out only for notes under ~1 KB, so the entry count is not the constraint. The open number is the
-block count, which the on-card fill test settles against real free NVM.
+The "without" column was measured on the card, and it matched the simulator exactly. The realistic
+mix is 3–4 pairs: the UI default is 3, a node network uses nodes + 2, and the deployed testnet
+maximum is 10. That means roughly **27–31 notes per J3R200**. Entries run out only for notes under
+about 1 KB, so the entry count is not the constraint.
