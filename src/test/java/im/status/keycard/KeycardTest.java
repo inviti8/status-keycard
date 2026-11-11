@@ -1017,6 +1017,28 @@ public class KeycardTest {
 
 
   @Test
+  @DisplayName("A new secure channel starts without the previous channel's PIN")
+  @Capabilities("keyManagement")
+  void newSecureChannelForgetsPin() throws Exception {
+    if (!cmdSet.getApplicationInfo().hasCredentialsManagementCapability()) {
+      return;
+    }
+    // GENERATE KEY needs only a verified PIN, so this does not depend on
+    // what an earlier test left on the card.
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
+
+    // No SELECT in between: only a fresh channel, as another process or
+    // reader would open. It must not inherit the holder's PIN.
+    cmdSet.autoOpenSecureChannel();
+    assertEquals(0x6985, cmdSet.generateKey().getSw());
+
+    assertEquals(0x9000, cmdSet.verifyPIN("000000").getSw());
+    assertEquals(0x9000, cmdSet.generateKey().getSw());
+  }
+
+  @Test
   @DisplayName("SIGN command")
   void signTest() throws Exception {
     byte[] data = "some data to be hashed".getBytes();

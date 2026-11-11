@@ -281,6 +281,12 @@ public class KeycardApplet extends Applet {
     try {
       switch (apduBuffer[ISO7816.OFFSET_INS]) {
         case SecureChannelV2.INS_OPEN_SECURE_CHANNEL:
+          // A new channel is a new session. Secure Channel V2 has no
+          // pairing, so anyone can open one; without this a PIN verified
+          // in the previous channel stayed valid in the next, and whoever
+          // opened it -- another process, another reader -- inherited the
+          // holder's authorisation (Kenter audit P11-WS4-1).
+          resetAuthentication();
           secureChannel.openSecureChannel(apdu);
           break;
         case SecureChannelV2.INS_SECURED_APDU:
@@ -579,6 +585,19 @@ public class KeycardApplet extends Applet {
   }
 
   /**
+   * Forgets every verified credential. SELECT and OPEN SECURE CHANNEL both
+   * start a session, and a session starts unauthorised: one place, so the
+   * two cannot drift apart.
+   */
+  private void resetAuthentication() {
+    if (pin != null) {
+      altPIN.reset();
+      mainPIN.reset();
+      puk.reset();
+    }
+  }
+
+  /**
    * Invoked on applet (re-)selection. Resets PIN/PUK verification state and secure channel.
    * Responds with application info including UID, version, key UID, capabilities and certificate.
    *
@@ -588,9 +607,7 @@ public class KeycardApplet extends Applet {
     byte appStatus = 0;
 
     if (pin != null) {
-      altPIN.reset();
-      mainPIN.reset();
-      puk.reset();
+      resetAuthentication();
       appStatus = (byte) (APP_STATUS_INITIALIZED | pin.getTriesRemaining());
 
       if (masterSsk.isInitialized()) {
