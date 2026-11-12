@@ -173,7 +173,9 @@ never stored. So the store keeps the counter:
 
 - **NEXT INDEX** returns the next index and advances the counter. The advance is persisted, with
   one atomic write, **before** the response, so a response lost to a tear only skips an index;
-  one is never handed out twice. Gaps cost nothing; duplicates cost privacy.
+  one is never handed out twice. Gaps cost nothing; duplicates cost privacy. It is not a getter:
+  every call spends an index, so a client that only wants to show the counter uses ADVANCE INDEX
+  with 0.
 - **ADVANCE INDEX** raises the counter to at least a value and never lowers it. A desktop that
   issued indexes itself (`next_owner_index` in its state) syncs the card with it. A value of 0 just
   reads the counter.
@@ -217,7 +219,7 @@ On a J3R452 the same CAP takes larger install parameters. Nothing else changes.
 | `B5` | READ | entry | — | `offset:2 length:1` (≤240) | data |
 | `B6` | DELETE | entry | `00` = HELD, `01` = abort WRITING | `tag:32` (must match: guards against deleting the wrong entry) | — |
 | `B7` | SET META | entry | — | `tag:32 meta:M` | — |
-| `B8` | NEXT INDEX | — | — | — | `index:4`: the owner index handed out (D7) |
+| `B8` | NEXT INDEX | — | — | — | `index:4`: the owner index handed out (D7); every call spends one, read with `B9` and 0 |
 | `B9` | ADVANCE INDEX | — | — | `value:4` (≤ `0x80000000`) | `next:4`: the counter after raising it to at least `value`; `0` reads it |
 
 Status words:
