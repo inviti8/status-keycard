@@ -5,7 +5,6 @@ import com.licel.jcardsim.smartcardio.CardTerminalSimulator;
 import com.licel.jcardsim.utils.AIDUtil;
 import im.status.keycard.applet.Certificate;
 import im.status.keycard.applet.Identifiers;
-import im.status.keycard.applet.IdentCommandSet;
 import im.status.keycard.applet.KeycardCommandSet;
 import im.status.keycard.desktop.PCSCCardChannel;
 import apdu4j.pcsc.TerminalManager;
@@ -96,11 +95,9 @@ public class StellarM4Test {
     CardChannel channel = card.getBasicChannel();
     PCSCCardChannel sdkChannel = new PCSCCardChannel(channel);
 
-    IdentCommandSet idCmdSet = new IdentCommandSet(sdkChannel);
-    idCmdSet.select().checkOK();
     // the identity certificate is write-once: on a card KeycardTest may already have stored one,
-    // signed by the same test CA, so 6985 is fine
-    idCmdSet.storeData(TestIdentity.certStoreData(caKeyPair)).checkSW(0x9000, 0x6985);
+    // signed by the same test CA, and provision leaves it as it is
+    TestIdentity.provision(sdkChannel, caKeyPair);
 
     byte[] caCompressed = ((org.bouncycastle.jce.interfaces.ECPublicKey) caKeyPair.getPublic()).getQ().getEncoded(true);
     cmdSet = new KeycardCommandSet(sdkChannel, caCompressed);

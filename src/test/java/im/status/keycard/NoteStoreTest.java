@@ -4,7 +4,6 @@ import com.licel.jcardsim.smartcardio.CardSimulator;
 import com.licel.jcardsim.smartcardio.CardTerminalSimulator;
 import com.licel.jcardsim.utils.AIDUtil;
 import im.status.keycard.applet.Certificate;
-import im.status.keycard.applet.IdentCommandSet;
 import im.status.keycard.applet.Identifiers;
 import im.status.keycard.desktop.PCSCCardChannel;
 import im.status.keycard.io.APDUResponse;
@@ -153,9 +152,7 @@ public class NoteStoreTest {
     void connect(CardTerminal terminal) throws Exception {
       PCSCCardChannel channel = new PCSCCardChannel(terminal.connect("*").getBasicChannel());
       ca = caKeyPair();
-      IdentCommandSet idCmdSet = new IdentCommandSet(channel);
-      idCmdSet.select().checkOK();
-      idCmdSet.storeData(TestIdentity.certStoreData(ca)).checkSW(0x9000, 0x6985); // write-once
+      TestIdentity.provision(channel, ca); // write-once
       byte[] caPub = ((org.bouncycastle.jce.interfaces.ECPublicKey) ca.getPublic()).getQ().getEncoded(true);
       cmdSet = new TestKeycardCommandSet(channel, caPub);
       initIfNeeded();
@@ -669,8 +666,7 @@ public class NoteStoreTest {
     r.duressPin = true;
     PCSCCardChannel channel = new PCSCCardChannel(CardTerminalSimulator.terminal(r.simulator).connect("*").getBasicChannel());
     r.ca = Rig.caKeyPair();
-    new IdentCommandSet(channel).select().checkOK();
-    new IdentCommandSet(channel).storeData(TestIdentity.certStoreData(r.ca)).checkSW(0x9000, 0x6985);
+    TestIdentity.provision(channel, r.ca);
     r.cmdSet = new TestKeycardCommandSet(channel, ((org.bouncycastle.jce.interfaces.ECPublicKey) r.ca.getPublic()).getQ().getEncoded(true));
     r.cmdSet.select().checkOK();
 
