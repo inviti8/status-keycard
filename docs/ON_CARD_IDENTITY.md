@@ -1,8 +1,9 @@
 # On-card identity key generation (plan)
 
-**Status:** approved by the owner (§7). Implemented in the simulator: `IdentApplet`, `SharedMemory`,
-`TestIdentity.provision`, and `IdentityTest` 8/8; full simulator suite 73/73; the CAP converts.
-Not yet run on a card. **Branch:** `feat/stellar-ed25519`.
+**Status:** approved by the owner (§7) and implemented (`d8de143`): `IdentApplet`, `SharedMemory`,
+`TestIdentity.provision`, and `IdentityTest`. The full simulator suite passes (73/73). On the
+J3R200, the full card suite passes and GENERATE IDENTITY takes 77 ms (`ONMETAL_REPORT.md`).
+**Branch:** `feat/stellar-ed25519`.
 
 ## The problem
 

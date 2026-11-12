@@ -205,3 +205,22 @@ the first.** Otherwise Gradle treats the test results as up to date: it
 installs the applet and skips the suite, and the suite is what provisions
 the identity certificate.
 
+
+## The card generates its own identity key (2026-11-12, d8de143)
+
+`docs/ON_CARD_IDENTITY.md`. Card 1 was reinstalled with the owner's agreement, which wiped its test
+wallet. Then `cleanTest test` on the card target:
+
+| Suite | Result | Notes |
+|---|---|---|
+| KeycardTest | 28/28 | Its setup provisioned the identity: GENERATE IDENTITY on card, the test CA signed off card, STORE DATA of 98 bytes |
+| StellarM4Test | 1/1 | |
+| NoteStoreTest | 13/13 on the card | 7 simulator-only |
+| IdentityTest `frozen` | 1/1 on the card, re-run without reinstall | GENERATE and STORE DATA on the certified card answer `6985`; the certificate is unchanged |
+| Kenter `probe_identity` | 4/4 | The certificate verifies against the dev CA; a different expected identity is refused |
+
+- **GENERATE IDENTITY on the J3R200: 77 ms** over NFC, end to end, key generation included.
+- The suite ran several FACTORY RESETs after provisioning, and the identity survived all of them.
+  The later suites found the card already certified and did not generate again: the log shows one
+  GENERATE.
+- The card's identity changed with the reinstall (`028dc395…` to `02ed78a7…`).

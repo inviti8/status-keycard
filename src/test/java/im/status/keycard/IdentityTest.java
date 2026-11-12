@@ -30,8 +30,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * The on-card identity (docs/ON_CARD_IDENTITY.md): the card generates its identity key, only the public key leaves
- * it, and the CA certificate written back must name that key. Needs a fresh card for every test, so it runs in the
- * simulator only; the card target covers it through provisioning in the other suites.
+ * it, and the CA certificate written back must name that key. Most tests need a fresh card, so they run in the
+ * simulator only; on the card target the other suites provision the identity and frozen() checks it stays fixed.
  */
 public class IdentityTest {
   static final boolean SIMULATOR = "simulator".equals(System.getProperty("im.status.keycard.test.target", "card"));
@@ -61,17 +61,29 @@ public class IdentityTest {
 
   @BeforeEach
   void setup() throws Exception {
-    assumeTrue(SIMULATOR);
-    simulator = new CardSimulator();
-    install(Identifiers.KEYCARD_AID, KeycardApplet.class, Identifiers.getKeycardInstanceAID(), null);
-    install(Identifiers.IDENT_AID, IdentApplet.class, Identifiers.IDENT_INSTANCE_AID, new byte[] {0x01, 0x00, 0x02, (byte) 0xC9, 0x00});
-    channel = new PCSCCardChannel(CardTerminalSimulator.terminal(simulator).connect("*").getBasicChannel());
+    javax.smartcardio.CardTerminal terminal = null;
+    if (SIMULATOR) {
+      simulator = new CardSimulator();
+      install(Identifiers.KEYCARD_AID, KeycardApplet.class, Identifiers.getKeycardInstanceAID(), null);
+      install(Identifiers.IDENT_AID, IdentApplet.class, Identifiers.IDENT_INSTANCE_AID, new byte[] {0x01, 0x00, 0x02, (byte) 0xC9, 0x00});
+      terminal = CardTerminalSimulator.terminal(simulator);
+    } else {
+      for (javax.smartcardio.CardTerminal t : apdu4j.pcsc.TerminalManager.getTerminalFactory().terminals().list()) {
+        if (t.isCardPresent()) {
+          terminal = t;
+          break;
+        }
+      }
+      assertNotNull(terminal, "no PC/SC reader with a card present");
+    }
+    channel = new PCSCCardChannel(terminal.connect("*").getBasicChannel());
     ident = new IdentCommandSet(channel);
   }
 
   @Test
   @DisplayName("a new card has no identity: SELECT returns nothing, STORE DATA is refused, Keycard refuses everything")
   void emptyCard() throws Exception {
+    assumeTrue(SIMULATOR);
     assertEquals(0, ident.select().checkOK().getData().length);
     assertEquals(SW_CONDITIONS, ident.storeData(new byte[SharedMemory.CERT_LEN]).getSw());
     assertEquals(SW_CONDITIONS, keycardSelect().getSw());
@@ -80,6 +92,7 @@ public class IdentityTest {
   @Test
   @DisplayName("GENERATE IDENTITY returns a compressed secp256k1 point, and SELECT then returns the same key")
   void generate() throws Exception {
+    assumeTrue(SIMULATOR);
     ident.select().checkOK();
     byte[] pub = TestIdentity.generate(channel);
 
@@ -95,6 +108,7 @@ public class IdentityTest {
   @Test
   @DisplayName("generating again replaces the key, and a certificate for the old key is refused")
   void regenerate() throws Exception {
+    assumeTrue(SIMULATOR);
     ident.select().checkOK();
     byte[] first = TestIdentity.generate(channel);
     byte[] second = TestIdentity.generate(channel);
@@ -108,6 +122,7 @@ public class IdentityTest {
   @Test
   @DisplayName("STORE DATA of a matching certificate certifies the card; SELECT returns it and it recovers to the CA")
   void certify() throws Exception {
+    assumeTrue(SIMULATOR);
     byte[] cert = TestIdentity.provision(channel, ca);
 
     assertArrayEquals(cert, ident.select().checkOK().getData());
@@ -124,6 +139,7 @@ public class IdentityTest {
   @Test
   @DisplayName("STORE DATA refuses wrong lengths, the old certificate-plus-private-key form and another key")
   void storeRejects() throws Exception {
+    assumeTrue(SIMULATOR);
     ident.select().checkOK();
     byte[] pub = TestIdentity.generate(channel);
     byte[] cert = TestIdentity.certify(ca, pub);
@@ -143,6 +159,7 @@ public class IdentityTest {
   @Test
   @DisplayName("a certified identity is frozen: GENERATE and STORE DATA are refused and the certificate stays")
   void frozen() throws Exception {
+    // runs on the card too: a certified card is left as it is, so the refusals change nothing
     byte[] cert = TestIdentity.provision(channel, ca);
 
     ident.select().checkOK();
@@ -157,6 +174,7 @@ public class IdentityTest {
   @Test
   @DisplayName("the secure channel opens under the certified key, and only for a client pinning the issuing CA")
   void secureChannel() throws Exception {
+    assumeTrue(SIMULATOR);
     TestIdentity.provision(channel, ca);
 
     TestKeycardCommandSet good = new TestKeycardCommandSet(channel, caPub(ca));
@@ -172,6 +190,7 @@ public class IdentityTest {
   @Test
   @DisplayName("FACTORY RESET leaves the identity: same certificate, and the channel still opens under it")
   void survivesFactoryReset() throws Exception {
+    assumeTrue(SIMULATOR);
     byte[] cert = TestIdentity.provision(channel, ca);
 
     TestKeycardCommandSet cmdSet = new TestKeycardCommandSet(channel, caPub(ca));

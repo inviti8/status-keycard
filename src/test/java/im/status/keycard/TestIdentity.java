@@ -48,7 +48,9 @@ public class TestIdentity {
 
   /** Sends GENERATE IDENTITY to the selected Ident applet and returns the compressed public key. */
   public static byte[] generate(CardChannel channel) throws Exception {
+    long start = System.nanoTime();
     APDUResponse resp = channel.send(new APDUCommand(0x80, GENERATE_IDENTITY, 0, 0, new byte[0], true)).checkOK();
+    System.out.println("[ident] GENERATE IDENTITY: " + ((System.nanoTime() - start) / 1000000) + " ms");
     return resp.getData();
   }
 
