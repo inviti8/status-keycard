@@ -50,9 +50,10 @@ Each of these was checked against `KeycardApplet.java` on `feat/stellar-ed25519`
 
 ### Path
 
-The path is fixed forever. Proposal: `m/1009'/0'/0'`. It is hardened all the way and sits under
-neither the EIP-1581 nor the BIP85 prefix. Purpose `1009'` is not, to my knowledge, used by any
-wallet standard; confirm before freezing it.
+The path is **`m/1009'/0'/0'`**, frozen forever (owner decision, 2026-11-12). It is hardened all
+the way and sits under neither the EIP-1581 nor the BIP85 prefix. Purpose `1009'` is not, to my
+knowledge, used by any wallet standard. The number itself carries no meaning; the seed provides the
+strength.
 
 The tool hard-codes the path and refuses any other.
 
@@ -163,17 +164,20 @@ skip it, but it is cheap.
   code as `InstallTask`. It contains nothing downstream-specific; pinned keys, reader names, the
   path and the log location come from a config file.
 - **Downstream:** a wrapper can hold its own config.
-- **ISD locking:** per-card keys derived from a master key (`gp --lock` style). That master key is
-  a second secret. One option: derive it from the CA phrase via BIP85 on the CA card (a fixed index
-  under `m/83696968'`), so the one phrase backs up everything. The cost is that the GP master
-  crosses the laptop at every session.
+- **ISD locking:**
+  - One random GP master key, generated once at CA setup on the offline laptop.
+  - Written on the same backup paper as the CA phrase, both copies.
+  - Not derived from the CA phrase or the CA card.
+  - GlobalPlatformPro's built-in key derivation (a master key plus a KDF option) turns it into
+    per-card keys, so the tool adds no key code of its own.
+  - The exact GPPro options get confirmed on a dev card before production.
 
 ## Owner decisions (2026-11-12)
 
-1. **The CA path:** open; the owner asked for context.
-2. **The spare CA:** a separate phrase on its own card pair. Yes.
-3. **The GP master key:** not derived from the CA phrase. The owner wants to avoid extra
-   complexity unless it is needed; the simplest adequate scheme is still open.
+1. **The CA path:** `m/1009'/0'/0'`, frozen. The spare uses the same path on its own phrase.
+2. **The spare CA:** a separate phrase on its own card pair.
+3. **The GP master key:** one random master key, written with the CA phrase. Per-card keys come
+   from GPPro's built-in derivation.
 4. **Readers:** a contact reader for the CA card.
 5. **The counter:** the tool logs a NEXT INDEX value before each SIGN. The CA-mode applet counter is
    left for later.
