@@ -181,3 +181,21 @@ test is the evidence.
 
 Capacity is unchanged (43 / 31 / 27 / 14 / 7 at 2 / 3 / 4 / 10 / 24 pairs). Free memory: **12,504 B**
 persistent, 86 B CLEAR_ON_RESET and 2,592 B CLEAR_ON_DESELECT. The new code takes 420 B.
+
+## A new secure channel forgets the PIN on the card (2026-11-11, 88d31fd)
+
+Audit P11-WS4-1: the applet kept the PIN verified across OPEN SECURE CHANNEL.
+Before the reflash, Kenter's `probe_pin_carryover` did VERIFY PIN on one
+channel, opened a second, and sent NOTE NEXT INDEX without a PIN. It got
+`9000`. Then `./gradlew test -Pim.status.keycard.test.target=card --tests
+im.status.keycard.KeycardTest`, which installs first:
+
+| Suite | Result | Notes |
+|---|---|---|
+| KeycardTest | 28/28 | Includes `newSecureChannelForgetsPin` |
+| Kenter `probe_pin_carryover` | `6985` | A new channel starts without the PIN |
+| Kenter `on_metal`, `replacement_card`, `card_ceremony` | 6/6, 1/1, 1/1 | Client side unchanged |
+
+The Ident applet was reinstalled with the rest, so the card's identity key
+changed (`03c7a53f…` to `028dc395…`).
+
