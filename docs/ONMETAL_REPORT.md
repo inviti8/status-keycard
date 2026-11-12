@@ -199,3 +199,9 @@ im.status.keycard.KeycardTest`, which installs first:
 The Ident applet was reinstalled with the rest, so the card's identity key
 changed (`03c7a53f…` to `028dc395…`).
 
+Card 2 the same day (identity `039a2ca1…` to `021d76e7…`): 28/28, probe
+`6985`, Kenter card tests pass. **Run `cleanTest test` on every card after
+the first.** Otherwise Gradle treats the test results as up to date: it
+installs the applet and skips the suite, and the suite is what provisions
+the identity certificate.
+
